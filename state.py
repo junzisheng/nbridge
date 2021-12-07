@@ -4,6 +4,7 @@ class State(object):
     WORK = "WORK"
     WAIT_CLIENT_READY = "WAIT_CLIENT_READY"
     DISCONNECT = "DISCONNECT"
+    WORK_PREPARE = "WORK_PREPARE"
 
     def __init__(self):
         self.st = self.WAIT_AUTH

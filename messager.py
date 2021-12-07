@@ -1,10 +1,13 @@
-from typing import Any, Union, Optional, Tuple, Dict
+from typing import Any, Union, Optional, Tuple, Dict, List
 import uuid
 from multiprocessing import Queue as Mqueue
 from asyncio import Queue, Task
 import asyncio
 from asyncio import Future
 from concurrent.futures import ThreadPoolExecutor
+
+import os
+from loguru import logger
 
 
 class MessageType:
@@ -35,11 +38,15 @@ class WaiterMessage(Message):
     _type = MessageType.WAITER
     waiter_map: Dict[str, Future] = {}
 
-    def __init__(self, event: str, waiter: Future, *args, **kwargs) -> None:
+    def __init__(self, event: str, *args, **kwargs) -> None:
         super(WaiterMessage, self).__init__(event, *args, **kwargs)
-        self.waiter = waiter
+        self._waiter = Future()
         self.waiter_id = str(uuid.uuid4())
-        self.waiter_map[self.waiter_id] = waiter
+        self.waiter_map[self.waiter_id] = self._waiter
+        self._waiter.add_done_callback(lambda _: self.waiter_map.pop(self.waiter_id))
+
+    def get_waiter(self) -> Future:
+        return self._waiter
 
     def get_content(self) -> list:
         """send: [_type, waiter_id, event, args, kwargs]"""
@@ -50,7 +57,9 @@ class WaiterMessage(Message):
 
     @classmethod
     def fire(cls, uid, result) -> None:
-        cls.waiter_map.pop(uid).set_result(result)
+        waiter = cls.waiter_map.get(uid)
+        if waiter and not waiter.cancelled():
+            waiter.set_result(result)
 
 
 class AnswerMessage(Message):
@@ -68,20 +77,40 @@ class CollectMessage(Message):
     pass
 
 
+def gather_message(
+        keepers: List['MessageKeeper'], event, *args, **kwargs
+) -> Future:
+    gather = []
+    for keep in keepers:
+        waiter_message = WaiterMessage(
+            event,
+            *args,
+            **kwargs
+        )
+        keep.send(waiter_message)
+        gather.append(waiter_message.get_waiter())
+    return asyncio.gather(*gather)
+
+
 class MessageKeeper(object):
-    def __init__(self, receiver: Any, queue: Union[Queue, Mqueue], callback_prefix: str = "on_message_") -> None:
-        self._loop = asyncio.get_running_loop()
+    def __init__(self, receiver: Any, input_queue: Union[Queue, Mqueue], output_queue: Union[Queue, Mqueue],
+                 callback_prefix: str = "on_message_") -> None:
+        self._loop = asyncio.get_event_loop()
         self.receiver = receiver
         self.callback_prefix = callback_prefix
-        self.queue = queue
+        self.input_queue = input_queue
+        self.output_queue = output_queue
         self.listen_task: Optional[Task] = None
 
-    def get_queue(self) -> Union[Queue, Mqueue]:
-        return self.queue
+    def get_input_queue(self) -> Union[Queue, Mqueue]:
+        return self.input_queue
+
+    def get_output_queue(self) -> Union[Queue, Mqueue]:
+        return self.output_queue
 
     def listen(self) -> None:
         self.listen_task = self._loop.create_task(
-            self.async_listen(self.queue)
+            self.async_listen(self.output_queue)
         )
 
     def send(self, message: Message) -> None:
@@ -105,13 +134,13 @@ class MessageKeeper(object):
             waiter_id, result = message
             WaiterMessage.fire(waiter_id, result)
 
-    def callback(self, event, *args, **kwargs) -> Union[Any, Future]:
+    def callback(self, event: str, *args, **kwargs) -> Union[Any, Future]:
         try:
-            callback = getattr(self.receiver, self.callback_prefix + event)
-        except AttributeError as e:
-            raise
-        else:
+            callback = getattr(self.receiver, self.callback_prefix + event.lower())
             return callback(*args, **kwargs)
+        except Exception as e:
+            logger.exception(e)
+            raise
 
     async def async_listen(self, q: Union[Mqueue, Queue]) -> None:
         raise None
@@ -124,11 +153,11 @@ class MessageKeeper(object):
 class AsyncMessageKeeper(MessageKeeper):
     async def async_listen(self, q: Queue) -> None:
         while True:
-            message = await self.queue.get()
+            message = await q.get()
             self.receive(message)
 
     def send(self, message: Message) -> None:
-        self.queue.put_nowait(message.dumps())
+        self.input_queue.put_nowait(message.dumps())
 
 
 class ProcessMessageKeeper(MessageKeeper):
@@ -140,10 +169,14 @@ class ProcessMessageKeeper(MessageKeeper):
                     _executor,
                     q.get
                 )
-            except:
-                await asyncio.sleep(0.1)
+            except ConnectionRefusedError as e:
+                logger.exception(e)
+                # message = q.get()
+                # self.receive(message)
+            except Exception as e:
+                print(e.__class__)
             else:
                 self.receive(message)
 
     def send(self, message: Message) -> None:
-        self.queue.put(message.dumps())
+        self.input_queue.put(message.dumps())

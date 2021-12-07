@@ -1,8 +1,8 @@
 from typing import Union, List
-from asyncio import Task, TimerHandle
+from asyncio import Task, TimerHandle, Future
 import asyncio
 
-TaskType = Union[Task, TimerHandle]
+TaskType = Union[Task, TimerHandle, Future]
 
 
 class TimerHandlerWrapper(object):
@@ -35,7 +35,7 @@ class AexitContext(object):
     def call_later(self, delay, callback, *args) -> TimerHandlerWrapper:
 
         def callback_wrapper(*_args):
-            self._set.remove(timer)
+            self.safe_remove(timer)
             return callback(*_args)
         timer = self._loop.call_later(delay, callback_wrapper, *args)
         self._set.append(timer)
@@ -44,7 +44,21 @@ class AexitContext(object):
     def create_task(self, coro, *, name=None) -> Task:
         task = self._loop.create_task(coro, name=name)
         self._set.append(task)
-        task.add_done_callback(lambda _: self._set.remove(task))
+        task.add_done_callback(lambda _: self.safe_remove(f))
         return task
+
+    def create_future(self) -> Future:
+        f = Future()
+        f.add_done_callback(
+            lambda _: self.safe_remove(f)
+        )
+        self._set.append(f)
+        return f
+
+    def safe_remove(self, f):
+        try:
+            self._set.remove(f)
+        except:
+            pass
 
 

@@ -1,6 +1,7 @@
 from typing import Optional, Dict
-from asyncio import Future, TimerHandle
+from asyncio import Future, TimerHandle, CancelledError
 import uuid
+from functools import partial
 
 from loguru import logger
 
@@ -50,13 +51,23 @@ class ManagerServer(BaseProtocol, PingPong):
             temp_token = str(uuid.uuid4())  # 随机生成token
             self.host_name = host_name
             self.registry.register(host_name, self)
-            self.session_created_waiter.set_result((self, temp_token))
+            # 这里需要等到worker收到消息更新token之后才能给客户端通知，
+            # 不然可能出现客户端先收到消息，进行proxy client连接，但是proxy server还未接收到token
+            process_receive_waiter = self.aexit_context.create_future()
+
+            @process_receive_waiter.add_done_callback
+            def callback(f: Future):
+                try:
+                    f.result()
+                    self.rpc_call(
+                        ClientRevoker.call_session_created,
+                        token=temp_token,
+                        proxy_port_list=[w.port for w in self.workers.values()]
+                    )
+                except CancelledError:
+                    pass
+            self.session_created_waiter.set_result((self, temp_token, process_receive_waiter))
             self.ping()
-            self.rpc_call(
-                ClientRevoker.call_session_created,
-                token=temp_token,
-                proxy_port_list=[w.port for w in self.workers.values()]
-            )
 
     def on_auth_fail(self):
         self.rpc_call(

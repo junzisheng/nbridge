@@ -9,11 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
 
-from settings import settings
+from messager import ProcessMessageKeeper, Message
 from constants import CloseReason
 from bridge_manager.client import ClientProtocol
 from worker import Event, create_event
 from sub_process import get_subprocess
+from settings import settings
 from bridge_manager.worker import ClientWorker
 from utils import loop_travel
 
@@ -24,13 +25,12 @@ class Client(object):
     def __init__(self) -> None:
         self._loop = asyncio.get_event_loop()
         self.queue = Queue()  # 和client通信
-        self.process_input_queues: List[Mqueue] = []
-        self.process_output_queues: List[Mqueue] = []
+        self.message_keepers: [ProcessMessageKeeper] = []
         self.processes: List[SpawnProcess] = []
         self._loop.set_default_executor(
             ThreadPoolExecutor(max_workers=min(settings.workers * 2 + 1, 32, (os.cpu_count() or 1)+4))
         )
-        self.input_queue_iter: Optional[Iterable] = None
+        self.iter_message_keeper: Optional[Iterable] = None
         self.tasks: List[Task] = []
 
     def run(self) -> None:
@@ -67,14 +67,13 @@ class Client(object):
 
     def run_worker(self) -> None:
         for idx in range(settings.workers):
-            input_queue = Mqueue()
-            output_queue = Mqueue()
-            self.process_output_queues.append(output_queue)
-            self.process_input_queues.append(input_queue)
-            pro = get_subprocess(ClientWorker.run, input_queue, output_queue)
+            message_keeper = ProcessMessageKeeper(self, Mqueue(), Mqueue())
+            self.message_keepers.append(message_keeper)
+            pro = get_subprocess(ClientWorker.run, message_keeper.get_input_queue(), message_keeper.get_output_queue())
             self.processes.append(pro)
             pro.start()
-        self.input_queue_iter = loop_travel(self.process_input_queues)
+            message_keeper.listen()
+        self.iter_message_keeper = loop_travel(self.message_keepers)
 
     async def listen_client_queue(self) -> None:
         while True:
@@ -86,9 +85,9 @@ class Client(object):
 
     def on_client_proxy_create(self, port: int, token: str) -> None:
         """manager连接成功，通知子进程连接proxy"""
-        queue: Queue = next(self.input_queue_iter)
-        queue.put(
-            create_event(
+        message_keeper: ProcessMessageKeeper = next(self.iter_message_keeper)
+        message_keeper.send(
+            Message(
                 Event.PROXY_CREATE, host_name, port, token, size=settings.worker_pool_size
             )
         )
@@ -96,7 +95,7 @@ class Client(object):
     def on_client_manager_disconnect(self, reason: int) -> None:
         """manager 断开连接"""
         self.broadcast_process(
-            create_event(Event.MANAGER_DISCONNECT)
+            Message(Event.MANAGER_DISCONNECT)
         )
         if reason == CloseReason.UN_EXPECTED:
             logger.info(f'【{host_name}】disconnected unexpected retry')
@@ -111,9 +110,9 @@ class Client(object):
             logger.info(f'【{host_name}】ping timeout, retry')
             self.run_client()
 
-    def broadcast_process(self, event: tuple) -> None:
-        for queue in self.process_input_queues:
-            queue.put(event)
+    def broadcast_process(self, message: Message) -> None:
+        for message_keeper in self.message_keepers:
+            message_keeper.send(message)
 
     def exit(self):
         for pro in self.processes:

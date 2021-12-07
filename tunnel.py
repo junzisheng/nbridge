@@ -35,7 +35,7 @@ class TunnelPair(object):
 
 class ProxyServerTunnelPair(TunnelPair):
     def register_tunnel(self, tunnel: 'ProxyServerTunnelPair', end_point: tuple) -> None:
-        assert self.owner.state.st == State.IDLE
+        assert self.owner.state.st == State.WORK_PREPARE
         from bridge_proxy.client import ProxyRevoker
         super(ProxyServerTunnelPair, self).register_tunnel(tunnel)
         self.owner.state.to(State.WORK)

@@ -8,20 +8,18 @@ import socket
 
 import asyncio
 
-import os
 from loguru import logger
 from pydantic import BaseModel
 
 from constants import CloseReason
+from revoker import Revoker
+from worker import ProcessWorker, Event
+from state import State
+from messager import Message, ProcessMessageKeeper
 from bridge_proxy.server import ProxyServer
 from bridge_proxy.client import ProxyClient
-from revoker import Revoker
 from bridge_public.protocol import PublicProtocol
 from settings import settings
-from worker import ProcessWorker, create_event, Event
-from state import State
-
-g = 0
 
 
 class Statistic(BaseModel):
@@ -38,19 +36,15 @@ class Statistic(BaseModel):
 
 
 class WorkerStruct(object):
-    def __init__(self, pid: int, port: int, process: SpawnProcess, input_queue: Queue, output_queue: Queue) -> None:
+    def __init__(self, pid: int, port: int, process: SpawnProcess, message_keeper: ProcessMessageKeeper) -> None:
         self.pid = pid
         self.port = port
         self.process = process
-        self.input_queue = input_queue
-        self.out_queue = output_queue
-        self.proxy_statistic: Dict[str, Statistic] = defaultdict(Statistic)
+        self.message_keeper = message_keeper
+        self.proxy_state_shot: Dict[str, int] = defaultdict(lambda :0)
 
-    def get(self) -> Any:
-        return self.out_queue.get()
-
-    def put(self, data: Any) -> None:
-        self.input_queue.put(data)
+    def put(self, message: Message) -> None:
+        self.message_keeper.send(message)
 
 
 class ManagerWorker(ProcessWorker):
@@ -61,7 +55,7 @@ class ManagerWorker(ProcessWorker):
 
     def start(self) -> None:
         def factory():
-            return ProxyServer(lambda h: self.token_map.get(h), self.report_state)
+            return ProxyServer(lambda h: self.token_map.get(h),  self.report_proxy_state)
 
         server = self._loop.run_until_complete(
             self._loop.create_server(
@@ -70,41 +64,48 @@ class ManagerWorker(ProcessWorker):
                 port=0
             )
         )
-        self.input_queue.put(server.sockets[0].getsockname()[1])
+        self.message_keeper.get_input_queue().put(server.sockets[0].getsockname()[1])
 
-    def report_state(self, pre_state: str, state: str, protocol: ProxyServer) -> None:
+    def current_proxy_state_map(self, host_name: str) -> Dict[str, int]:
+        state_map: Dict[str, int] = defaultdict(lambda: 0)
+        for p in self.proxy_map[host_name]:
+            state_map[p.state.st] += 1
+        return dict(state_map)
+
+    def report_proxy_state(self, pre_state: str, state: str, protocol: ProxyServer) -> None:
+        """上报proxy状态"""
+        host_name = protocol.host_name
         if pre_state == State.WAIT_AUTH and state == State.IDLE:
-            self.proxy_map[protocol.host_name].append(protocol)
+            self.proxy_map[host_name].append(protocol)
             logger.info(f'Proxy 客户端【{protocol.host_name}】连接')
         elif pre_state != State.DISCONNECT and state == State.DISCONNECT:
             try:
-                self.proxy_map[protocol.host_name].remove(protocol)
+                self.proxy_map[host_name].remove(protocol)
                 logger.info(f'Proxy 客户端【{protocol.host_name}】断开连接')
             except ValueError:
                 pass
-        idle = work = 0
-        state_map = defaultdict(lambda : 0)
-        for p in self.proxy_map[protocol.host_name]:
-            state_map[p.state.st] += 1
-            if p.state.st == State.IDLE:
-                idle += 1
-            elif p.state.st not in [State.WAIT_AUTH, State.IDLE, State.DISCONNECT]:
-                work += 1
-        # print(state_map)
-        self.input_queue.put(
-            create_event(
-                Event.PROXY_STATE_CHANGE,
-                protocol.host_name,
-                idle,
-                work,
-                dict(state_map)
-            )
-        )
 
-    def on_client_connect(self, token: str, host_name: str) -> None:
+        if pre_state != State.IDLE and state == State.IDLE:
+            self.message_keeper.send(
+                Message(
+                    Event.PROXY_STATE_CHANGE,
+                    self.pid,
+                    host_name,
+                    True
+                )
+            )
+
+    def require_proxy(self, host_name: str) -> Optional[ProxyServer]:
+        proxy_server_list = self.proxy_map[host_name]
+        for proxy in proxy_server_list:
+            if proxy.state.st == State.IDLE:
+                return proxy
+        return None
+
+    def on_message_client_connect(self, token: str, host_name: str) -> None:
         self.token_map[host_name] = token
 
-    def on_client_disconnect(self, host_name: str) -> None:
+    def on_message_client_disconnect(self, host_name: str) -> None:
         if host_name in self.token_map:
             del self.token_map[host_name]
             for protocol in self.proxy_map[host_name]:
@@ -115,18 +116,30 @@ class ManagerWorker(ProcessWorker):
                 protocol.transport.close()
             del self.proxy_map[host_name]
 
-    def on_public_create(self, host_name: str, sock: socket.socket, end_point: tuple) -> None:
-        self._loop.create_task(self._loop.create_connection(
-            partial(PublicProtocol, end_point, partial(self.require_proxy, host_name)),
-            sock=sock
-        ))
+    def on_message_public_create(self, host_name: str, sock: socket.socket, end_point: tuple) -> None:
+        proxy = self.require_proxy(host_name)
+        if proxy:
+            proxy.state.to(State.WORK_PREPARE)
+            self._loop.create_task(self._loop.create_connection(
+                partial(PublicProtocol, end_point, proxy),
+                sock=sock
+            ))
+        else:
+            sock.close()
+            self.message_keeper.send(
+                Message(
+                    Event.PROXY_STATE_CHANGE,
+                    self.pid,
+                    host_name,
+                    False
+                )
+            )
 
-    def require_proxy(self, host_name: str) -> Optional[ProxyServer]:
-        proxy_server_list = self.proxy_map[host_name]
-        for proxy in proxy_server_list:
-            if proxy.state.st == State.IDLE:
-                return proxy
-        return None
+    def on_message_query_proxy_state(self) -> Tuple[Dict, int]:
+        host_map = {}
+        for host_name in self.proxy_map.keys():
+            host_map[host_name] = self.current_proxy_state_map(host_name)
+        return host_map, self.pid
 
 
 class ClientWorker(ProcessWorker):
@@ -159,16 +172,13 @@ class ClientWorker(ProcessWorker):
             except Exception as e:
                 if self.manager_connected:
                     logger.info(f'【{host}】ProxyServer connect fail;retry')
-                    self.create_connection_task(factory, host, port, 0)
+                    self.create_connection_task(factory, host, port, 1)
 
     def proxy_connect_handle(self, p: ProxyClient, _) -> None:
-        global g
-        g += 1
-        print(g, os.getpid())
         if self.manager_connected:
             self.protocols.append(p)
         else:
-            print(self.manager_connected)
+            pass
 
     def proxy_disconnect_handle(self, factory: callable, host: str, port: int, f: Future) -> None:
         if not self.manager_connected:
@@ -180,7 +190,7 @@ class ClientWorker(ProcessWorker):
             print('reason', proxy_protocol.close_reason)
             pass
 
-    def on_proxy_create(self, host_name, port, token, size) -> None:
+    def on_message_proxy_create(self, host_name, port, token, size) -> None:
         self.manager_connected = True
         for i in range(size):
             self.create_connection_task(
@@ -189,7 +199,7 @@ class ClientWorker(ProcessWorker):
                 port=port,
             )
 
-    def on_manager_disconnect(self):
+    def on_message_manager_disconnect(self):
         self.manager_connected = False
         for task in self.tasks:
             if not task.done():

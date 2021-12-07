@@ -10,7 +10,9 @@ from worker import Event, create_event
 
 
 class ClientRevoker(Revoker):
+    authed = False
     def call_session_created(self, token: str, proxy_port_list: List[int]) -> None:
+        self.authed = True
         logger.info(f'【{self.protocol.host_name}】Manager Server Session Created')
         for port in proxy_port_list:
             self.protocol.queue.put_nowait(create_event(
@@ -36,12 +38,13 @@ class ClientProtocol(BaseProtocol):
         )
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
-        self.queue.put_nowait(
-            create_event(
-                Event.MANAGER_DISCONNECT,
-                self.close_reason
+        if self.revoker.authed:
+            self.queue.put_nowait(
+                create_event(
+                    Event.MANAGER_DISCONNECT,
+                    self.close_reason
+                )
             )
-        )
 
 
 

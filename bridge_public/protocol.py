@@ -6,32 +6,26 @@ import errno
 
 from loguru import logger
 
+from bridge_proxy.server import ProxyServer
 from protocols import BaseProtocol
 from tunnel import PublicTunnelPair
 
 
 class PublicProtocol(BaseProtocol):
-    def __init__(self, end_point: tuple, require_proxy: callable):
+    def __init__(self, end_point: tuple, proxy: ProxyServer):
         super(PublicProtocol, self).__init__()
         self.tunnel = PublicTunnelPair(self)
-        self.require_proxy = require_proxy
+        self.proxy = proxy
         self.end_point = end_point
 
     def on_connection_made(self) -> None:
-        from bridge_proxy.server import ProxyServer
-        proxy: ProxyServer = self.require_proxy()
-        if not proxy:
-            self.transport.close()
-        else:
-            self.tunnel.register_tunnel(proxy.tunnel)
-            proxy.tunnel.register_tunnel(self.tunnel, self.end_point)
-            logger.debug('public server connected')
+        self.tunnel.register_tunnel(self.proxy.tunnel)
+        self.proxy.tunnel.register_tunnel(self.tunnel, self.end_point)
 
     def data_received(self, data: bytes) -> None:
         self.tunnel.forward(data)
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
-        logger.debug('public server disconnected')
         self.tunnel.unregister_tunnel()
 
 

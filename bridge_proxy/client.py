@@ -52,7 +52,6 @@ class ProxyRevoker(Revoker):
                 self.protocol.rpc_call(
                     ServerRevoker.call_session_disconnect
                 )
-        logger.debug(f'new proxy session: {end_point}')
         host, port = end_point
         loop = asyncio.get_event_loop()
         self._task = loop.create_task(loop.create_connection(
