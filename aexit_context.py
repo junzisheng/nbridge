@@ -44,7 +44,7 @@ class AexitContext(object):
     def create_task(self, coro, *, name=None) -> Task:
         task = self._loop.create_task(coro, name=name)
         self._set.append(task)
-        task.add_done_callback(lambda _: self.safe_remove(f))
+        task.add_done_callback(lambda _: self.safe_remove(task))
         return task
 
     def create_future(self) -> Future:

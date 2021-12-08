@@ -1,42 +1,27 @@
-from typing import Tuple, Any, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List
+from itertools import chain
 from collections import defaultdict
-from multiprocessing import Queue
 from multiprocessing import Process
-from multiprocessing.context import SpawnProcess
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import recv_handle
 from functools import partial
+import asyncio
 from asyncio import Task, Future, Transport, CancelledError
-from concurrent.futures import ThreadPoolExecutor
+from asyncio.base_events import Server
 import socket
 
-import asyncio
-
 from loguru import logger
-from pydantic import BaseModel
 
 from constants import CloseReason
 from revoker import Revoker
 from worker import ProcessWorker, Event
 from state import State
+from utils import safe_remove
 from messager import Message, ProcessPipeMessageKeeper
 from bridge_proxy.server import ProxyServer
 from bridge_proxy.client import ProxyClient
 from bridge_public.protocol import PublicProtocol
 from settings import settings
-
-
-class Statistic(BaseModel):
-    idle: int = 0
-    work: int = 0
-
-    def total(self) -> int:
-        return self.idle + self.work
-
-    def __repr__(self):
-        return f'idle:{self.idle} | work:{self.work}'
-
-    __str__ = __repr__
 
 
 class WorkerStruct(object):
@@ -59,38 +44,56 @@ class ManagerWorker(ProcessWorker):
         self.token_map: Dict[str, str] = {}
         self.proxy_map: Dict[str, List[ProxyServer]] = defaultdict(list)
         self.socket_recv_conn = socket_recv_conn
+        self.proxy_server: Optional[Server] = None
 
     def start(self) -> None:
         def factory():
             return ProxyServer(lambda h: self.token_map.get(h),  self.report_proxy_state)
 
-        server = self._loop.run_until_complete(
+        self.proxy_server = self._loop.run_until_complete(
             self._loop.create_server(
                 factory,
                 host=settings.proxy_bind_host,
                 port=0
             )
         )
-        self.message_keeper.get_input().send(server.sockets[0].getsockname()[1])
-        self._loop.create_task(
+        self.message_keeper.get_input().send(self.proxy_server.sockets[0].getsockname()[1])
+        self.aexit_context.create_task(
             self.listen_receive_socket()
         )
 
-    async def listen_receive_socket(self) -> None:
-        _executor = ThreadPoolExecutor(max_workers=1)
+    async def _handle_stop(self) -> None:
+        self.token_map = {}
+        waiters = []
+        # 关闭proxy server
+        if self.proxy_server:
+            self.proxy_server.close()
+            waiters.append(self.proxy_server.wait_closed())
+        # 断开所有proxy client
+        for proxy in chain(*self.proxy_map.values()):  # type: ProxyServer
+            proxy.rpc_call(
+                Revoker.call_set_close_reason,
+                CloseReason.SERVER_CLOSE,
+            )
+        logger.info(f'Worker Process【{self.pid}】: Proxy Client Closed')
+        if waiters:
+            await asyncio.gather(*waiters)
+        logger.info(f'Worker Process【{self.pid}】: Proxy Server Closed')
 
+    async def listen_receive_socket(self) -> None:
+        """接收public请求并序列为socket"""
         def _receive_socket() -> tuple:
             fd: int = recv_handle(self.socket_recv_conn)
-            host_name, end_point = self.socket_recv_conn.recv()
-            return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM), host_name, end_point
+            _host_name, _end_point = self.socket_recv_conn.recv()
+            return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM), _host_name, _end_point
 
         while True:
             try:
-                sock, host_name, end_point = await self._loop.run_in_executor(_executor, _receive_socket)
+                sock, host_name, end_point = await self._loop.run_in_executor(None, _receive_socket)
                 proxy = self.require_proxy(host_name)
                 if proxy:
                     proxy.state.to(State.WORK_PREPARE)
-                    self._loop.create_task(self._loop.create_connection(
+                    self.aexit_context.create_task(self._loop.create_connection(
                         partial(PublicProtocol, end_point, proxy),
                         sock=sock
                     ))
@@ -104,8 +107,9 @@ class ManagerWorker(ProcessWorker):
                             False
                         )
                     )
-            except Exception as e:
-                print(e.__class__)
+            except EOFError:
+                # 主进程退出，这里正好退出循环，否则子进程无法正常关闭
+                break
 
     def current_proxy_state_map(self, host_name: str) -> Dict[str, int]:
         state_map: Dict[str, int] = defaultdict(lambda: 0)
@@ -118,13 +122,10 @@ class ManagerWorker(ProcessWorker):
         host_name = protocol.host_name
         if pre_state == State.WAIT_AUTH and state == State.IDLE:
             self.proxy_map[host_name].append(protocol)
-            logger.info(f'Proxy 客户端【{protocol.host_name}】连接')
+            logger.info(f'Proxy Client【{protocol.host_name}】Connect')
         elif pre_state != State.DISCONNECT and state == State.DISCONNECT:
-            try:
-                self.proxy_map[host_name].remove(protocol)
-                logger.info(f'Proxy 客户端【{protocol.host_name}】断开连接')
-            except ValueError:
-                pass
+            if safe_remove(self.proxy_map[host_name], protocol):
+                logger.info(f'Proxy Client【{protocol.host_name}】DisConnected')
 
         if pre_state != State.IDLE and state == State.IDLE:
             self.message_keeper.send(
@@ -171,12 +172,12 @@ class ClientWorker(ProcessWorker):
         self.protocols: List[ProxyClient] = []
         self.manager_connected = False
 
-    def create_connection_task(self, factory: callable, host: str, port: int, d: int=0) -> None:
-        async def delay() -> None:
-            if d > 0:
+    def create_connection_task(self, factory: callable, host: str, port: int, delay: int = 0) -> None:
+        async def delay_create() -> None:
+            if delay > 0:
                 await asyncio.sleep(d)
             return await self._loop.create_connection(factory, host=host, port=port)
-        task = self._loop.create_task(delay())
+        task = self._loop.create_task(delay_create())
         self.tasks.append(task)
 
         @task.add_done_callback
@@ -200,17 +201,16 @@ class ClientWorker(ProcessWorker):
         if self.manager_connected:
             self.protocols.append(p)
         else:
-            pass
+            p.transport.close()
 
     def proxy_disconnect_handle(self, factory: callable, host: str, port: int, f: Future) -> None:
-        if not self.manager_connected:
-            return
         proxy_protocol: ProxyClient = f.result()
         if proxy_protocol.close_reason in [CloseReason.PING_TIMEOUT, CloseReason.UN_EXPECTED]:
-            self.create_connection_task(factory, host=host, port=port)
+            if self.manager_connected:
+                self.create_connection_task(factory, host=host, port=port)
         else:
-            print('reason', proxy_protocol.close_reason)
-            pass
+            logger.info(f'Proxy Client Disconnect: {proxy_protocol.close_reason}')
+        safe_remove(self.protocols, proxy_protocol)
 
     def on_message_proxy_create(self, host_name, port, token, size) -> None:
         self.manager_connected = True

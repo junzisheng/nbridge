@@ -144,7 +144,7 @@ class MessageKeeper(object):
             raise
 
     async def async_listen(self, q: Union[Mqueue, Queue]) -> None:
-        raise None
+        raise NotImplementedError
 
     def stop(self) -> None:
         if self.listen_task and not self.listen_task.done():
@@ -168,18 +168,30 @@ class AsyncMessageKeeper(MessageKeeper):
 
 
 class _ProcessMessageKeeper(MessageKeeper):
+    def __init__(self, *args, **kwargs) -> None:
+        super(_ProcessMessageKeeper, self).__init__(*args, **kwargs)
+        self._executor: Optional[ThreadPoolExecutor] = None
+
     async def async_listen(self, q: Union[Connection, Queue]) -> None:
-        _executor = ThreadPoolExecutor(max_workers=1)
+        self._executor = ThreadPoolExecutor(max_workers=1)
         while True:
             try:
                 message = await self._loop.run_in_executor(
-                    _executor,
+                    self._executor,
                     self.do_get,
                 )
+            except EOFError:
+                # 主进程退出，这里正好退出循环，否则子进程无法正常关闭
+                break
             except Exception as e:
-                print(e.__class__)
+                logger.info(e.__class__.__name__)
             else:
                 self.receive(message)
+
+    def stop(self) -> None:
+        super(_ProcessMessageKeeper, self).stop()
+        if self._executor:
+            self._executor.shutdown(wait=False)
 
 
 class ProcessQueueMessageKeeper(_ProcessMessageKeeper):
@@ -197,3 +209,7 @@ class ProcessPipeMessageKeeper(_ProcessMessageKeeper):
     def send(self, message: Message) -> None:
         self.input.send(message.dumps())
 
+    def stop(self):
+        super(ProcessPipeMessageKeeper, self).stop()
+        self.output.close()
+        self.input.close()

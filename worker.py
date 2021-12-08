@@ -1,11 +1,16 @@
-from typing import Tuple
+from typing import Tuple, Type
+import sys
+import signal
+import os
 import asyncio
-from multiprocessing import Queue
 from multiprocessing.connection import Connection
 
-import os
 from loguru import logger
 
+from common_bases import Closer
+from utils import ignore
+from constants import HANDLED_SIGNALS
+from aexit_context import AexitContext
 from messager import ProcessPipeMessageKeeper
 
 
@@ -19,6 +24,7 @@ class Event(object):
     PUBLIC_CREATE = "PUBLIC_CREATE"
     MANAGER_DISCONNECT = "MANAGER_DISCONNECT"
     QUERY_PROXY_STATE = "QUERY_PROXY_STATE"
+    SERVER_CLOSE = "SERVER_CLOSE"
 
 
 EventType = Tuple[str, tuple, dict]
@@ -28,18 +34,37 @@ def create_event(event: str, *args, **kwargs) -> EventType:
     return event, args, kwargs
 
 
+def run_worker(worker_cls: Type['ProcessWorker'], *args, **kwargs) -> None:
+    # 这里忽略信号，由主进程通知关闭
+    for sig in HANDLED_SIGNALS:
+        signal.signal(sig, ignore)
+    worker = worker_cls(*args, **kwargs)
+    worker.message_keeper.listen()
+    worker.closer.run()
+    worker.start()
+    worker._loop.run_forever()
+    worker._loop.close()
+
+
 class ProcessWorker(object):
     def __init__(self, input: Connection, output: Connection) -> None:
+        self.closer = Closer(self.handle_stop)
         self._loop = asyncio.get_event_loop()
         self.pid = os.getpid()
         self.message_keeper = ProcessPipeMessageKeeper(self, input, output)
-
-    @classmethod
-    def run(cls, *args, **kwargs) -> None:
-        worker = cls(*args, **kwargs)
-        worker.message_keeper.listen()
-        worker.start()
-        worker._loop.run_forever()
+        self.aexit_context = AexitContext()
 
     def start(self) -> None:
         pass
+
+    async def handle_stop(self) -> None:
+        self.message_keeper.stop()
+        self.aexit_context.cancel_all()
+        await self._handle_stop()
+        self._loop.stop()
+
+    async def _handle_stop(self) -> None:
+        pass
+
+    def on_message_server_close(self) -> None:
+        self.closer.call_close()

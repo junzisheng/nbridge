@@ -1,7 +1,6 @@
 from typing import Optional, Dict
 from asyncio import Future, TimerHandle, CancelledError
 import uuid
-from functools import partial
 
 from loguru import logger
 

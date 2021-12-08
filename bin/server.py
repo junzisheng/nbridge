@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from collections import defaultdict
 import sys
 import signal
@@ -7,7 +7,8 @@ import threading
 import os
 import asyncio
 from asyncio import Future, futures
-from multiprocessing import Queue, Pipe
+from asyncio.base_events import Server as Aserver
+from multiprocessing import Pipe, Process
 from multiprocessing.reduction import recv_handle, send_handle
 from functools import partial
 
@@ -17,13 +18,15 @@ import uvloop
 s = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, s)
 
-from sub_process import get_subprocess
 from state import State
-from worker import Event
-from messager import ProcessPipeMessageKeeper, Message, WaiterMessage, gather_message
+from common_bases import Closer
+from constants import CloseReason, HANDLED_SIGNALS
+from worker import Event, run_worker
+from revoker import Revoker
+from aexit_context import AexitContext
+from messager import ProcessPipeMessageKeeper, Message, gather_message
 from bridge_manager.server import ManagerServer
-from bridge_manager.worker import WorkerStruct
-from bridge_manager.worker import ManagerWorker
+from bridge_manager.worker import WorkerStruct, ManagerWorker
 from bridge_manager.monitor import MonitorServer
 from bridge_public.protocol import start_public_server
 from settings import settings
@@ -31,27 +34,26 @@ from settings import settings
 
 uvloop.install()
 
-HANDLED_SIGNALS = (
-    signal.SIGINT,  # Unix signal 2. Sent by Ctrl+C.
-    signal.SIGTERM,  # Unix signal 15. Sent by `kill <pid>`.
-)
-
 
 class Server(object):
-    exit_event = threading.Event()
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._loop = asyncio.get_event_loop()
+        self.closer = Closer(self._handle_stop)
         self.workers: Dict[int, WorkerStruct] = {}
         self.managers: Dict[str, ManagerServer] = {}
+        self.aexit = AexitContext()
+        self.manager_server: Optional[Aserver] = None
+        self.public_servers: List[socket.socket] = []
 
     def run(self) -> None:
         self.install_signal_handlers()
+        self.closer.run()
         self.run_worker()
         self.run_manager()
         self.run_monitor()
         self.run_public_server()
         self._loop.run_forever()
+        self._loop.close()
 
     def run_manager(self) -> None:
         def factory():
@@ -86,11 +88,11 @@ class Server(object):
                     )
             return ManagerServer(session_created_waiter, session_disconnect_waiter, self.workers)
 
-        self._loop.run_until_complete(
+        self.manager_server = self._loop.run_until_complete(
             self._loop.create_server(factory, host=settings.manager_bind_host, port=settings.manager_bind_port)
         )
-        logger.info(f'manager_server[{settings.manager_bind_host}:{settings.manager_bind_port}] - '
-                    f'{os.getpid()} - started')
+        logger.info(f'Manager Server - [{settings.manager_bind_host}:{settings.manager_bind_port}] - '
+                    f'{os.getpid()}: Started')
 
     def run_public_server(self) -> None:
         for host_name, host, port in settings.client_endpoint_default:
@@ -99,10 +101,11 @@ class Server(object):
                 partial(self.receive_public_socket, host_name, (host, port)),
             )
             bind_port = s.getsockname()[1]
-            logger.info(f'public server 【{bind_port}】 -> 【{host_name}】({host}:{port})')
+            logger.info(f'Public Server -【{bind_port}】 -> 【{host_name}】({host}:{port}) : Started')
+            self.public_servers.append(s)
 
     def run_monitor(self):
-        self._loop.create_task(
+        self.aexit.create_task(
             self.loop_monitor()
         )
         # MonitorServer.server = self
@@ -155,7 +158,8 @@ class Server(object):
             socket_output, socket_input = Pipe()
 
             message_keeper = ProcessPipeMessageKeeper(self, server_input, client_output)
-            pro = get_subprocess(ManagerWorker.run, client_input, server_output, socket_output)
+            pro = Process(target=run_worker, args=(ManagerWorker, client_input, server_output, socket_output))
+            pro.daemon = True
             pro.start()
             socket_output.close()
             server_output.close()
@@ -169,7 +173,7 @@ class Server(object):
                                                  pid=pro.pid, process=pro,
                                                  message_keeper=message_keeper,
                                                  port=port)
-            logger.info(f'proxy_server[{settings.proxy_bind_host}:{port}] - {os.getpid()} started')
+            logger.info(f'Proxy Server - 【{settings.proxy_bind_host}:{port}】 - {os.getpid()}: Started')
 
     def receive_public_socket(self, host_name: str, end_point: tuple, sock: socket.socket) -> None:
         def get_sort_list():
@@ -190,7 +194,10 @@ class Server(object):
             worker = self.workers[receiver[2]]
             # 这里先减去，防止并发导致多个请求进入一个进程，等后面进程重新上报新的数据覆盖
             worker.proxy_state_shot[host_name] -= 1
-            send_handle(worker.socket_input, sock.fileno(), worker.pid)
+            try:
+                send_handle(worker.socket_input, sock.fileno(), worker.pid)
+            except Exception as e:
+                print(e)
             worker.socket_input.send((host_name, end_point))
         else:
             sock.close()
@@ -205,10 +212,50 @@ class Server(object):
             signal.signal(sig, self.handle_exit)
 
     def handle_exit(self, sig: signal.Signals, frame: FrameType) -> None:
-        self.exit_event.set()
+        self.closer.call_close()
 
+    async def _handle_stop(self) -> None:
+        waiter_list = []
+        self.aexit.cancel_all()
+        # 关闭manager server
+        if self.manager_server:
+            self.manager_server.close()
+        waiter_list.append(self.manager_server.wait_closed())
+        # 关闭public
+        for s in self.public_servers:
+            self._loop.remove_reader(s.fileno())
+            s.close()
+        logger.info('Public Servers Closed')
+        # 关闭所有子进程
+        workers = self.workers.values()
+        for worker in workers:
+            worker.put(
+                Message(
+                    Event.SERVER_CLOSE
+                )
+            )
+            worker.message_keeper.stop()
+            worker.socket_input.close()
+        for worker in workers:
+            worker.process.join()
+            logger.info(f'Process 【{worker.pid}】Closed')
+        # 关闭manager client
+        for m in self.managers.values():
+            m.rpc_call(
+                Revoker.call_set_close_reason,
+                CloseReason.SERVER_CLOSE,
+            )
+            m.transport.close()
+            logger.info(f'Manager Client 【{m.host_name}】Closed')
+        # 异步的都放到最后处理
+        if waiter_list:
+            await asyncio.gather(*waiter_list)
+        logger.info('Manager Server Closed')
 
-server = Server()
+        self._loop.stop()
+        logger.info('Closed!')
+
 
 if __name__ == '__main__':
+    server = Server()
     server.run()
