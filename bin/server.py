@@ -231,10 +231,10 @@ class Server(object):
                     Event.SERVER_CLOSE
                 )
             )
-            worker.message_keeper.stop()
             worker.socket_input.close()
         for worker in workers:
             worker.process.join()
+            worker.message_keeper.stop()
             logger.info(f'Process 【{worker.pid}】Closed')
         # 关闭manager client
         for m in self.managers.values():

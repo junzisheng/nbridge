@@ -7,7 +7,6 @@ import asyncio
 from asyncio import Future
 from concurrent.futures import ThreadPoolExecutor
 
-import os
 from loguru import logger
 
 
@@ -16,6 +15,7 @@ class MessageType:
     WAITER = "WAITER"
     ANSWER = "ANSWER"
     COLLECT = "COLLECT"
+    STOP_LISTEN = "STOP_LISTEN"
 
 
 class Message(object):
@@ -116,12 +116,12 @@ class MessageKeeper(object):
         )
 
     def send(self, message: Message) -> None:
-        self.input_channel.put(message.dumps())
+        self.put(message.dumps())
 
     def receive(self, message: list) -> None:
-        _type = message.pop(0)
+        _type = message[0]
         if _type == MessageType.WAITER:
-            waiter_id, event, args, kwargs = message
+            _, waiter_id, event, args, kwargs = message
             result = self.callback(event, *args, **kwargs)
             if isinstance(result, Future):
                 def c(f: Future):
@@ -130,10 +130,10 @@ class MessageKeeper(object):
             else:
                 self.send(AnswerMessage(waiter_id, result))
         elif _type == MessageType.NORMAL:
-            event, args, kwargs = message
+            _, event, args, kwargs = message
             self.callback(event, *args, **kwargs)
         elif _type == MessageType.ANSWER:
-            waiter_id, result = message
+            _, waiter_id, result = message
             WaiterMessage.fire(waiter_id, result)
 
     def callback(self, event: str, *args, **kwargs) -> Union[Any, Future]:
@@ -157,12 +157,22 @@ class MessageKeeper(object):
     def put(self, item: Any) -> None:
         raise NotImplementedError
 
+    def should_stop(self, message: list) -> bool:
+        from worker import Event
+        stop = message[0] == MessageType.NORMAL and message[1] == Event.SERVER_CLOSE
+        # 这里需要通知主进程来关闭主进程的循环监听
+        if stop:
+            self.put(Event.SERVER_CLOSE)
+        return stop
+
 
 class AsyncMessageKeeper(MessageKeeper):
     async def async_listen(self, q: Queue) -> None:
         while True:
             message = await self.get()
             self.receive(message)
+            if self.should_stop(message):
+                break
 
     def get(self) -> Any:
         return self.output_channel.get()
@@ -184,13 +194,11 @@ class _ProcessMessageKeeper(MessageKeeper):
                     self._executor,
                     self.get,
                 )
-            except EOFError:
-                # 主进程退出，这里正好退出循环，否则子进程无法正常关闭
-                break
+                self.receive(message)
+                if self.should_stop(message):
+                    break
             except Exception as e:
                 logger.info(e.__class__.__name__)
-            else:
-                self.receive(message)
         self._executor.shutdown(wait=False)
 
     def stop(self) -> None:

@@ -26,6 +26,7 @@ class Event(object):
     MANAGER_DISCONNECT = "MANAGER_DISCONNECT"
     QUERY_PROXY_STATE = "QUERY_PROXY_STATE"
     SERVER_CLOSE = "SERVER_CLOSE"
+    LISTEN_LOOP_STOP = "LISTEN_LOOP_STOP"
 
 
 EventType = Tuple[str, tuple, dict]
