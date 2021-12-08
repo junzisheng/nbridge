@@ -97,7 +97,7 @@ class Server(object):
     def run_public_server(self) -> None:
         for host_name, host, port in settings.client_endpoint_default:
             s = start_public_server(
-                ('0.0.0.0', 1200),
+                ('0.0.0.0', 444),
                 partial(self.receive_public_socket, host_name, (host, port)),
             )
             bind_port = s.getsockname()[1]

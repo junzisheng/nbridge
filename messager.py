@@ -187,6 +187,7 @@ class _ProcessMessageKeeper(MessageKeeper):
                 logger.info(e.__class__.__name__)
             else:
                 self.receive(message)
+        self._executor.shutdown(wait=False)
 
     def stop(self) -> None:
         super(_ProcessMessageKeeper, self).stop()

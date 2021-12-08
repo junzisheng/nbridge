@@ -11,6 +11,7 @@ from worker import Event, create_event
 
 class ClientRevoker(Revoker):
     authed = False
+
     def call_session_created(self, token: str, proxy_port_list: List[int]) -> None:
         self.authed = True
         logger.info(f'【{self.protocol.host_name}】Manager Server Session Created')
@@ -45,6 +46,5 @@ class ClientProtocol(BaseProtocol):
                     self.close_reason
                 )
             )
-
 
 
