@@ -1,6 +1,7 @@
 from typing import Any, Union, Optional, Tuple, Dict, List
 import uuid
 from multiprocessing import Queue as Mqueue
+from multiprocessing.connection import Connection
 from asyncio import Queue, Task
 import asyncio
 from asyncio import Future
@@ -93,24 +94,24 @@ def gather_message(
 
 
 class MessageKeeper(object):
-    def __init__(self, receiver: Any, input_queue: Union[Queue, Mqueue], output_queue: Union[Queue, Mqueue],
+    def __init__(self, receiver: Any, input: Union[Queue, Mqueue, Connection], output: Union[Queue, Mqueue, Connection],
                  callback_prefix: str = "on_message_") -> None:
-        self._loop = asyncio.get_event_loop()
+        self.input = input
+        self.output = output
         self.receiver = receiver
+        self._loop = asyncio.get_event_loop()
         self.callback_prefix = callback_prefix
-        self.input_queue = input_queue
-        self.output_queue = output_queue
         self.listen_task: Optional[Task] = None
 
-    def get_input_queue(self) -> Union[Queue, Mqueue]:
-        return self.input_queue
+    def get_input(self) -> Union[Queue, Mqueue, Connection]:
+        return self.input
 
-    def get_output_queue(self) -> Union[Queue, Mqueue]:
-        return self.output_queue
+    def get_output(self) -> Union[Queue, Mqueue, Connection]:
+        return self.output
 
     def listen(self) -> None:
         self.listen_task = self._loop.create_task(
-            self.async_listen(self.output_queue)
+            self.async_listen(self.output)
         )
 
     def send(self, message: Message) -> None:
@@ -149,34 +150,50 @@ class MessageKeeper(object):
         if self.listen_task and not self.listen_task.done():
             self.listen_task.cancel()
 
+    def do_get(self) -> Any:
+        raise NotImplementedError
+
 
 class AsyncMessageKeeper(MessageKeeper):
     async def async_listen(self, q: Queue) -> None:
         while True:
-            message = await q.get()
+            message = await self.do_get()
             self.receive(message)
 
     def send(self, message: Message) -> None:
-        self.input_queue.put_nowait(message.dumps())
+        self.input.put_nowait(message.dumps())
+
+    def do_get(self) -> Any:
+        return self.output.get()
 
 
-class ProcessMessageKeeper(MessageKeeper):
-    async def async_listen(self, q: Union[Mqueue, Queue]) -> None:
+class _ProcessMessageKeeper(MessageKeeper):
+    async def async_listen(self, q: Union[Connection, Queue]) -> None:
         _executor = ThreadPoolExecutor(max_workers=1)
         while True:
             try:
                 message = await self._loop.run_in_executor(
                     _executor,
-                    q.get
+                    self.do_get,
                 )
-            except ConnectionRefusedError as e:
-                logger.exception(e)
-                # message = q.get()
-                # self.receive(message)
             except Exception as e:
                 print(e.__class__)
             else:
                 self.receive(message)
 
+
+class ProcessQueueMessageKeeper(_ProcessMessageKeeper):
+    def do_get(self) -> Any:
+        return self.output.get()
+
     def send(self, message: Message) -> None:
-        self.input_queue.put(message.dumps())
+        self.input.put(message.dumps())
+
+
+class ProcessPipeMessageKeeper(_ProcessMessageKeeper):
+    def do_get(self) -> Any:
+        return self.output.recv()
+
+    def send(self, message: Message) -> None:
+        self.input.send(message.dumps())
+

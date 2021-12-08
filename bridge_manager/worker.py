@@ -1,9 +1,13 @@
 from typing import Tuple, Any, Dict, Optional, List
 from collections import defaultdict
 from multiprocessing import Queue
+from multiprocessing import Process
 from multiprocessing.context import SpawnProcess
+from multiprocessing.connection import Connection
+from multiprocessing.reduction import recv_handle
 from functools import partial
 from asyncio import Task, Future, Transport, CancelledError
+from concurrent.futures import ThreadPoolExecutor
 import socket
 
 import asyncio
@@ -15,7 +19,7 @@ from constants import CloseReason
 from revoker import Revoker
 from worker import ProcessWorker, Event
 from state import State
-from messager import Message, ProcessMessageKeeper
+from messager import Message, ProcessPipeMessageKeeper
 from bridge_proxy.server import ProxyServer
 from bridge_proxy.client import ProxyClient
 from bridge_public.protocol import PublicProtocol
@@ -36,7 +40,9 @@ class Statistic(BaseModel):
 
 
 class WorkerStruct(object):
-    def __init__(self, pid: int, port: int, process: SpawnProcess, message_keeper: ProcessMessageKeeper) -> None:
+    def __init__(self, socket_input: Connection, pid: int, port: int,
+                 process: Process, message_keeper: ProcessPipeMessageKeeper) -> None:
+        self.socket_input = socket_input
         self.pid = pid
         self.port = port
         self.process = process
@@ -48,10 +54,11 @@ class WorkerStruct(object):
 
 
 class ManagerWorker(ProcessWorker):
-    def __init__(self, output_queue: Queue, input_queue: Queue):
-        super().__init__(output_queue, input_queue)
+    def __init__(self, input: Connection, output: Connection, socket_recv_conn: Connection):
+        super().__init__(input, output)
         self.token_map: Dict[str, str] = {}
         self.proxy_map: Dict[str, List[ProxyServer]] = defaultdict(list)
+        self.socket_recv_conn = socket_recv_conn
 
     def start(self) -> None:
         def factory():
@@ -64,7 +71,41 @@ class ManagerWorker(ProcessWorker):
                 port=0
             )
         )
-        self.message_keeper.get_input_queue().put(server.sockets[0].getsockname()[1])
+        self.message_keeper.get_input().send(server.sockets[0].getsockname()[1])
+        self._loop.create_task(
+            self.listen_receive_socket()
+        )
+
+    async def listen_receive_socket(self) -> None:
+        _executor = ThreadPoolExecutor(max_workers=1)
+
+        def _receive_socket() -> tuple:
+            fd: int = recv_handle(self.socket_recv_conn)
+            host_name, end_point = self.socket_recv_conn.recv()
+            return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM), host_name, end_point
+
+        while True:
+            try:
+                sock, host_name, end_point = await self._loop.run_in_executor(_executor, _receive_socket)
+                proxy = self.require_proxy(host_name)
+                if proxy:
+                    proxy.state.to(State.WORK_PREPARE)
+                    self._loop.create_task(self._loop.create_connection(
+                        partial(PublicProtocol, end_point, proxy),
+                        sock=sock
+                    ))
+                else:
+                    sock.close()
+                    self.message_keeper.send(
+                        Message(
+                            Event.PROXY_STATE_CHANGE,
+                            self.pid,
+                            host_name,
+                            False
+                        )
+                    )
+            except Exception as e:
+                print(e.__class__)
 
     def current_proxy_state_map(self, host_name: str) -> Dict[str, int]:
         state_map: Dict[str, int] = defaultdict(lambda: 0)
@@ -116,25 +157,6 @@ class ManagerWorker(ProcessWorker):
                 protocol.transport.close()
             del self.proxy_map[host_name]
 
-    def on_message_public_create(self, host_name: str, sock: socket.socket, end_point: tuple) -> None:
-        proxy = self.require_proxy(host_name)
-        if proxy:
-            proxy.state.to(State.WORK_PREPARE)
-            self._loop.create_task(self._loop.create_connection(
-                partial(PublicProtocol, end_point, proxy),
-                sock=sock
-            ))
-        else:
-            sock.close()
-            self.message_keeper.send(
-                Message(
-                    Event.PROXY_STATE_CHANGE,
-                    self.pid,
-                    host_name,
-                    False
-                )
-            )
-
     def on_message_query_proxy_state(self) -> Tuple[Dict, int]:
         host_map = {}
         for host_name in self.proxy_map.keys():
@@ -143,8 +165,8 @@ class ManagerWorker(ProcessWorker):
 
 
 class ClientWorker(ProcessWorker):
-    def __init__(self, output_queue: Queue, input_queue: Queue) -> None:
-        super(ClientWorker, self).__init__(output_queue, input_queue)
+    def __init__(self, input: Connection, output: Connection) -> None:
+        super(ClientWorker, self).__init__(input, output)
         self.tasks: List[Task] = []
         self.protocols: List[ProxyClient] = []
         self.manager_connected = False

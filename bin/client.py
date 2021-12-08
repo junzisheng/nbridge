@@ -2,14 +2,16 @@ from typing import List, Optional, Iterable
 import os
 import asyncio
 from asyncio import Queue, Task, Future
-from multiprocessing import Queue as Mqueue
+from multiprocessing import Pipe
+from multiprocessing.connection import Connection
+from multiprocessing import Process
 from multiprocessing.context import SpawnProcess
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
 
-from messager import ProcessMessageKeeper, Message
+from messager import ProcessPipeMessageKeeper, Message
 from constants import CloseReason
 from bridge_manager.client import ClientProtocol
 from worker import Event, create_event
@@ -25,8 +27,8 @@ class Client(object):
     def __init__(self) -> None:
         self._loop = asyncio.get_event_loop()
         self.queue = Queue()  # 和client通信
-        self.message_keepers: [ProcessMessageKeeper] = []
-        self.processes: List[SpawnProcess] = []
+        self.message_keepers: [ProcessPipeMessageKeeper] = []
+        self.processes: List[Process] = []
         self._loop.set_default_executor(
             ThreadPoolExecutor(max_workers=min(settings.workers * 2 + 1, 32, (os.cpu_count() or 1)+4))
         )
@@ -67,11 +69,17 @@ class Client(object):
 
     def run_worker(self) -> None:
         for idx in range(settings.workers):
-            message_keeper = ProcessMessageKeeper(self, Mqueue(), Mqueue())
+            server_output, server_input = Pipe(False)
+            client_output, client_input = Pipe(False)
+
+            message_keeper = ProcessPipeMessageKeeper(self, server_input, client_output)
             self.message_keepers.append(message_keeper)
-            pro = get_subprocess(ClientWorker.run, message_keeper.get_input_queue(), message_keeper.get_output_queue())
-            self.processes.append(pro)
+            pro = get_subprocess(ClientWorker.run, client_input, server_output)
             pro.start()
+            self.processes.append(pro)
+            server_output.close()
+            client_input.close()
+
             message_keeper.listen()
         self.iter_message_keeper = loop_travel(self.message_keepers)
 
@@ -85,7 +93,7 @@ class Client(object):
 
     def on_client_proxy_create(self, port: int, token: str) -> None:
         """manager连接成功，通知子进程连接proxy"""
-        message_keeper: ProcessMessageKeeper = next(self.iter_message_keeper)
+        message_keeper: ProcessPipeMessageKeeper = next(self.iter_message_keeper)
         message_keeper.send(
             Message(
                 Event.PROXY_CREATE, host_name, port, token, size=settings.worker_pool_size

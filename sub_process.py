@@ -1,23 +1,22 @@
 import multiprocessing
 from multiprocessing.context import SpawnProcess
+from multiprocessing import Process, process
 from typing import Callable, Optional
 import sys
 
 import os
 
 multiprocessing.allow_connection_pickling()
-spawn = multiprocessing.get_context("spawn")
+# spawn = multiprocessing.get_context("spawn")
 
 
-def get_subprocess(target: Callable[..., None], *args, **kwargs) -> SpawnProcess:
+def get_subprocess(target: Callable[..., None], *args, **kwargs) -> Process:
     stdin_fileno: Optional[int]
     try:
         stdin_fileno = sys.stdin.fileno()
     except OSError:
         stdin_fileno = None
-    return spawn.Process(target=subprocess_started, kwargs={'target': target,
-                                                            'stdin_fileno': stdin_fileno,
-                                                            'args': args, 'kwargs': kwargs})
+    return Process(target=target, args=args, kwargs=kwargs)
 
 
 def subprocess_started(target: Callable[..., None], stdin_fileno: Optional[int], args, kwargs):

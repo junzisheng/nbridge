@@ -81,7 +81,8 @@ class ProxyClientTunnelPair(TunnelPair):
 class LocalTunnelPair(TunnelPair):
     def _unregistered_tunnel(self) -> None:
         if self.registered:
-            self.owner.transport._force_close(Exception())
+            self.owner.transport.close()
+            # self.owner.transport._force_close(Exception())
         super(LocalTunnelPair, self)._unregistered_tunnel()
 
     def forward(self, data: bytes) -> None:
@@ -104,5 +105,6 @@ class PublicTunnelPair(TunnelPair):
 
     def _unregistered_tunnel(self) -> None:
         if self.registered:
-            self.owner.transport._force_close(Exception())
+            self.owner.transport.close()
+            # self.owner.transport._force_close(ValueError())
         super(PublicTunnelPair, self)._unregistered_tunnel()

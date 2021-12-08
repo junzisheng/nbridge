@@ -7,7 +7,8 @@ import threading
 import os
 import asyncio
 from asyncio import Future, futures
-from multiprocessing import Queue
+from multiprocessing import Queue, Pipe
+from multiprocessing.reduction import recv_handle, send_handle
 from functools import partial
 
 import socket
@@ -19,7 +20,7 @@ sys.path.insert(0, s)
 from sub_process import get_subprocess
 from state import State
 from worker import Event
-from messager import ProcessMessageKeeper, Message, WaiterMessage, gather_message
+from messager import ProcessPipeMessageKeeper, Message, WaiterMessage, gather_message
 from bridge_manager.server import ManagerServer
 from bridge_manager.worker import WorkerStruct
 from bridge_manager.worker import ManagerWorker
@@ -101,7 +102,6 @@ class Server(object):
             logger.info(f'public server 【{bind_port}】 -> 【{host_name}】({host}:{port})')
 
     def run_monitor(self):
-        return
         self._loop.create_task(
             self.loop_monitor()
         )
@@ -114,13 +114,13 @@ class Server(object):
         #     )
         # )
 
-    def get_keepers(self) -> List[ProcessMessageKeeper]:
+    def get_keepers(self) -> List[ProcessPipeMessageKeeper]:
         return [w.message_keeper for w in self.workers.values()]
 
     async def loop_monitor(self):
         while True:
             from prettytable import PrettyTable
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
             Column = ["PID", State.IDLE, State.WORK, State.WAIT_CLIENT_READY, State.WAIT_AUTH, State.DISCONNECT]
             table = PrettyTable(Column)
             table_dict = defaultdict(dict)
@@ -149,16 +149,24 @@ class Server(object):
 
     def run_worker(self) -> None:
         for idx in range(settings.workers):
-            message_keeper = ProcessMessageKeeper(self, Queue(), Queue())
-            pro = get_subprocess(ManagerWorker.run, message_keeper.get_input_queue(),
-                                 message_keeper.get_output_queue())
+            server_output, server_input = Pipe(False)
+            client_output, client_input = Pipe(False)
+
+            socket_output, socket_input = Pipe()
+
+            message_keeper = ProcessPipeMessageKeeper(self, server_input, client_output)
+            pro = get_subprocess(ManagerWorker.run, client_input, server_output, socket_output)
             pro.start()
+            socket_output.close()
+            server_output.close()
+            client_input.close()
+
             # 进程随机port启动proxy服务，这里获取port
-            port = message_keeper.get_output_queue().get()
-            # for i in range(100):
-            #     message_keeper.get_input_queue().put(123)
+            port = message_keeper.output.recv()
+
             message_keeper.listen()
-            self.workers[pro.pid] = WorkerStruct(pid=pro.pid, process=pro,
+            self.workers[pro.pid] = WorkerStruct(socket_input=socket_input,
+                                                 pid=pro.pid, process=pro,
                                                  message_keeper=message_keeper,
                                                  port=port)
             logger.info(f'proxy_server[{settings.proxy_bind_host}:{port}] - {os.getpid()} started')
@@ -182,24 +190,13 @@ class Server(object):
             worker = self.workers[receiver[2]]
             # 这里先减去，防止并发导致多个请求进入一个进程，等后面进程重新上报新的数据覆盖
             worker.proxy_state_shot[host_name] -= 1
-            # worker.proxy_state_shot[host_name][State.WORK] += 1
-            worker.put(
-                Message(
-                    Event.PUBLIC_CREATE,
-                    host_name,
-                    sock,
-                    end_point
-                )
-            )
-            # MonitorServer.broadcast()
+            send_handle(worker.socket_input, sock.fileno(), worker.pid)
+            worker.socket_input.send((host_name, end_point))
         else:
-            print('-------')
             sock.close()
-        # print(get_sort_list())
 
     def on_message_proxy_state_change(self, pid: int, host_name: str, is_idle: bool) -> None:
         self.workers[pid].proxy_state_shot[host_name] += 1 if is_idle else -1
-        # MonitorServer.broadcast()
 
     def install_signal_handlers(self) -> None:
         if threading.current_thread() is not threading.main_thread():

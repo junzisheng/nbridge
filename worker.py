@@ -1,11 +1,12 @@
 from typing import Tuple
 import asyncio
 from multiprocessing import Queue
+from multiprocessing.connection import Connection
 
 import os
 from loguru import logger
 
-from messager import ProcessMessageKeeper
+from messager import ProcessPipeMessageKeeper
 
 
 class Event(object):
@@ -28,10 +29,10 @@ def create_event(event: str, *args, **kwargs) -> EventType:
 
 
 class ProcessWorker(object):
-    def __init__(self, output_queue: Queue, input_queue: Queue) -> None:
+    def __init__(self, input: Connection, output: Connection) -> None:
         self._loop = asyncio.get_event_loop()
         self.pid = os.getpid()
-        self.message_keeper = ProcessMessageKeeper(self, input_queue, output_queue)
+        self.message_keeper = ProcessPipeMessageKeeper(self, input, output)
 
     @classmethod
     def run(cls, *args, **kwargs) -> None:
