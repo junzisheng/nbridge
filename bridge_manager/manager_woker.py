@@ -1,9 +1,10 @@
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List, Type, Union
 from itertools import chain
 from collections import defaultdict
 from multiprocessing import Process
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import recv_handle
+from multiprocessing import Queue as process_Queue
 from functools import partial
 import asyncio
 from asyncio import Task, Future, Transport, CancelledError
@@ -17,7 +18,7 @@ from revoker import Revoker
 from worker import ProcessWorker, Event
 from state import State
 from utils import safe_remove
-from messager import Message, ProcessPipeMessageKeeper
+from messager import Message, ProcessQueueMessageKeeper, ProcessPipeMessageKeeper, MessageKeeper
 from bridge_proxy.server import ProxyServer
 from bridge_proxy.client import ProxyClient
 from bridge_public.protocol import PublicProtocol
@@ -26,7 +27,8 @@ from settings import settings
 
 class WorkerStruct(object):
     def __init__(self, socket_input: Connection, pid: int, port: int,
-                 process: Process, message_keeper: ProcessPipeMessageKeeper) -> None:
+                 process: Process,
+                 message_keeper: Union[ProcessPipeMessageKeeper, ProcessQueueMessageKeeper]) -> None:
         self.socket_input = socket_input
         self.pid = pid
         self.port = port
@@ -39,8 +41,9 @@ class WorkerStruct(object):
 
 
 class ManagerWorker(ProcessWorker):
-    def __init__(self, input: Connection, output: Connection, socket_recv_conn: Connection):
-        super().__init__(input, output)
+    def __init__(self, keeper_cls: Type[MessageKeeper], input_channel: Union[Connection, process_Queue],
+                 output_channel: Union[Connection, process_Queue], socket_recv_conn: Connection) -> None:
+        super().__init__(keeper_cls, input_channel, output_channel)
         self.token_map: Dict[str, str] = {}
         self.proxy_map: Dict[str, List[ProxyServer]] = defaultdict(list)
         self.socket_recv_conn = socket_recv_conn
@@ -57,7 +60,7 @@ class ManagerWorker(ProcessWorker):
                 port=0
             )
         )
-        self.message_keeper.get_input().send(self.proxy_server.sockets[0].getsockname()[1])
+        self.message_keeper.put(self.proxy_server.sockets[0].getsockname()[1])
         self.aexit_context.create_task(
             self.listen_receive_socket()
         )
@@ -166,8 +169,9 @@ class ManagerWorker(ProcessWorker):
 
 
 class ClientWorker(ProcessWorker):
-    def __init__(self, input: Connection, output: Connection) -> None:
-        super(ClientWorker, self).__init__(input, output)
+    def __init__(self, keeper_cls: Type[MessageKeeper], input_channel: Union[Connection, process_Queue],
+                 output_channel: Union[Connection, process_Queue]) -> None:
+        super(ClientWorker, self).__init__(keeper_cls, input_channel, output_channel)
         self.tasks: List[Task] = []
         self.protocols: List[ProxyClient] = []
         self.manager_connected = False

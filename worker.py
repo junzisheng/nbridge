@@ -1,9 +1,10 @@
-from typing import Tuple, Type
+from typing import Tuple, Type, Union
 import sys
 import signal
 import os
 import asyncio
 from multiprocessing.connection import Connection
+from multiprocessing import Queue
 
 from loguru import logger
 
@@ -11,7 +12,7 @@ from common_bases import Closer
 from utils import ignore
 from constants import HANDLED_SIGNALS
 from aexit_context import AexitContext
-from messager import ProcessPipeMessageKeeper
+from messager import ProcessPipeMessageKeeper, ProcessQueueMessageKeeper, MessageKeeper
 
 
 class Event(object):
@@ -47,11 +48,12 @@ def run_worker(worker_cls: Type['ProcessWorker'], *args, **kwargs) -> None:
 
 
 class ProcessWorker(object):
-    def __init__(self, input: Connection, output: Connection) -> None:
+    def __init__(self, keeper_cls: Type[MessageKeeper],
+                 input_channel: Union[Connection, Queue], output_channel: Union[Connection, Queue]) -> None:
         self.closer = Closer(self.handle_stop)
         self._loop = asyncio.get_event_loop()
         self.pid = os.getpid()
-        self.message_keeper = ProcessPipeMessageKeeper(self, input, output)
+        self.message_keeper = keeper_cls(self, input_channel, output_channel)
         self.aexit_context = AexitContext()
 
     def start(self) -> None:

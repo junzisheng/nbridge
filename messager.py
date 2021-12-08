@@ -94,28 +94,29 @@ def gather_message(
 
 
 class MessageKeeper(object):
-    def __init__(self, receiver: Any, input: Union[Queue, Mqueue, Connection], output: Union[Queue, Mqueue, Connection],
+    def __init__(self, receiver: Any, input_channel: Union[Queue, Mqueue, Connection],
+                 output_channel: Union[Queue, Mqueue, Connection],
                  callback_prefix: str = "on_message_") -> None:
-        self.input = input
-        self.output = output
+        self.input_channel = input_channel
+        self.output_channel = output_channel
         self.receiver = receiver
         self._loop = asyncio.get_event_loop()
         self.callback_prefix = callback_prefix
         self.listen_task: Optional[Task] = None
 
     def get_input(self) -> Union[Queue, Mqueue, Connection]:
-        return self.input
+        return self.input_channel
 
     def get_output(self) -> Union[Queue, Mqueue, Connection]:
-        return self.output
+        return self.output_channel
 
     def listen(self) -> None:
         self.listen_task = self._loop.create_task(
-            self.async_listen(self.output)
+            self.async_listen(self.output_channel)
         )
 
     def send(self, message: Message) -> None:
-        raise NotImplemented
+        self.input_channel.put(message.dumps())
 
     def receive(self, message: list) -> None:
         _type = message.pop(0)
@@ -150,21 +151,24 @@ class MessageKeeper(object):
         if self.listen_task and not self.listen_task.done():
             self.listen_task.cancel()
 
-    def do_get(self) -> Any:
+    def get(self) -> Any:
+        raise NotImplementedError
+
+    def put(self, item: Any) -> None:
         raise NotImplementedError
 
 
 class AsyncMessageKeeper(MessageKeeper):
     async def async_listen(self, q: Queue) -> None:
         while True:
-            message = await self.do_get()
+            message = await self.get()
             self.receive(message)
 
-    def send(self, message: Message) -> None:
-        self.input.put_nowait(message.dumps())
+    def get(self) -> Any:
+        return self.output_channel.get()
 
-    def do_get(self) -> Any:
-        return self.output.get()
+    def put(self, item: Any) -> None:
+        self.input_channel.put_nowait(item)
 
 
 class _ProcessMessageKeeper(MessageKeeper):
@@ -178,7 +182,7 @@ class _ProcessMessageKeeper(MessageKeeper):
             try:
                 message = await self._loop.run_in_executor(
                     self._executor,
-                    self.do_get,
+                    self.get,
                 )
             except EOFError:
                 # 主进程退出，这里正好退出循环，否则子进程无法正常关闭
@@ -196,21 +200,21 @@ class _ProcessMessageKeeper(MessageKeeper):
 
 
 class ProcessQueueMessageKeeper(_ProcessMessageKeeper):
-    def do_get(self) -> Any:
-        return self.output.get()
+    def get(self) -> Any:
+        return self.output_channel.get()
 
-    def send(self, message: Message) -> None:
-        self.input.put(message.dumps())
+    def put(self, item: Any) -> None:
+        self.input_channel.put(item)
 
 
 class ProcessPipeMessageKeeper(_ProcessMessageKeeper):
-    def do_get(self) -> Any:
-        return self.output.recv()
+    def get(self) -> Any:
+        return self.output_channel.recv()
 
-    def send(self, message: Message) -> None:
-        self.input.send(message.dumps())
+    def put(self, item: Any) -> None:
+        self.input_channel.send(item)
 
     def stop(self):
         super(ProcessPipeMessageKeeper, self).stop()
-        self.output.close()
-        self.input.close()
+        self.output_channel.close()
+        self.input_channel.close()

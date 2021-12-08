@@ -10,7 +10,7 @@ from protocols import BaseProtocol
 from bridge_manager.client import ClientRevoker
 from registry import Registry
 from settings import settings
-from bridge_manager.worker import WorkerStruct
+from bridge_manager.manager_woker import WorkerStruct
 
 
 class ManagerRevoker(Revoker):

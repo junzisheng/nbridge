@@ -8,7 +8,7 @@ import os
 import asyncio
 from asyncio import Future, futures
 from asyncio.base_events import Server as Aserver
-from multiprocessing import Pipe, Process
+from multiprocessing import Pipe, Process, Queue as process_queue
 from multiprocessing.reduction import recv_handle, send_handle
 from functools import partial
 
@@ -24,9 +24,9 @@ from constants import CloseReason, HANDLED_SIGNALS
 from worker import Event, run_worker
 from revoker import Revoker
 from aexit_context import AexitContext
-from messager import ProcessPipeMessageKeeper, Message, gather_message
+from messager import ProcessPipeMessageKeeper, ProcessQueueMessageKeeper, Message, gather_message
 from bridge_manager.server import ManagerServer
-from bridge_manager.worker import WorkerStruct, ManagerWorker
+from bridge_manager.manager_woker import WorkerStruct, ManagerWorker
 from bridge_manager.monitor import MonitorServer
 from bridge_public.protocol import start_public_server
 from settings import settings
@@ -152,21 +152,18 @@ class Server(object):
 
     def run_worker(self) -> None:
         for idx in range(settings.workers):
-            server_output, server_input = Pipe(False)
-            client_output, client_input = Pipe(False)
-
             socket_output, socket_input = Pipe()
-
-            message_keeper = ProcessPipeMessageKeeper(self, server_input, client_output)
-            pro = Process(target=run_worker, args=(ManagerWorker, client_input, server_output, socket_output))
+            input_queue, output_queue = process_queue(), process_queue()
+            message_keeper = ProcessQueueMessageKeeper(self, input_queue, output_queue)
+            pro = Process(target=run_worker,
+                          args=(ManagerWorker, ProcessQueueMessageKeeper, output_queue, input_queue, socket_output)
+                          )
             pro.daemon = True
             pro.start()
             socket_output.close()
-            server_output.close()
-            client_input.close()
 
             # 进程随机port启动proxy服务，这里获取port
-            port = message_keeper.output.recv()
+            port = message_keeper.get()
 
             message_keeper.listen()
             self.workers[pro.pid] = WorkerStruct(socket_input=socket_input,

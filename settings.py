@@ -11,8 +11,9 @@ class Settings(BaseSettings):
 
     token: str = "123"
     manager_bind_host: str = '0.0.0.0'
-    manager_remote_host: str = '1.117.201.217'
-    manager_bind_port: int = 1028
+    # manager_remote_host: str = '1.117.201.217'
+    manager_remote_host: str = '127.0.0.1'
+    manager_bind_port: int = 1029
     proxy_bind_host: str = "0.0.0.0"
     public_bind_port: int = 9999
     monitor_bind_host: str = "0.0.0.0"

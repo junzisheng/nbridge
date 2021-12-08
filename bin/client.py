@@ -2,20 +2,20 @@ from typing import List, Optional, Iterable
 import os
 import asyncio
 from asyncio import Queue, Task, Future
-from multiprocessing import Pipe
+from multiprocessing import Pipe, Queue as process_Queue
 from multiprocessing import Process
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
 
-from messager import ProcessPipeMessageKeeper, Message
+from messager import ProcessPipeMessageKeeper, Message, ProcessQueueMessageKeeper
 from constants import CloseReason
 from bridge_manager.client import ClientProtocol
 from worker import Event, run_worker
 from sub_process import get_subprocess
 from settings import settings
-from bridge_manager.worker import ClientWorker
+from bridge_manager.manager_woker import ClientWorker
 from utils import loop_travel
 
 host_name = 'test_host'
@@ -72,7 +72,7 @@ class Client(object):
 
             message_keeper = ProcessPipeMessageKeeper(self, server_input, client_output)
             self.message_keepers.append(message_keeper)
-            pro = get_subprocess(run_worker, ClientWorker, client_input, server_output)
+            pro = get_subprocess(run_worker, ClientWorker, ProcessPipeMessageKeeper, client_input, server_output)
             pro.start()
             self.processes.append(pro)
             server_output.close()
