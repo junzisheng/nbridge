@@ -6,7 +6,7 @@ import errno
 
 from loguru import logger
 
-from bridge_proxy.server import ProxyServer
+from proxy.server import ProxyServer
 from protocols import BaseProtocol
 from tunnel import PublicTunnelPair
 
@@ -43,7 +43,7 @@ def start_public_server(sa, post: callable) -> socket.socket:
         for i in range(backlog):
             try:
                 conn, addr = server.accept()
-                conn.set_inheritable(True)
+                # conn.set_inheritable(True)
                 post(conn)
             except (BlockingIOError, InterruptedError, ConnectionAbortedError):
                 return None

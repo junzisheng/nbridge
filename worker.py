@@ -62,6 +62,7 @@ class ProcessWorker(object):
 
     async def handle_stop(self) -> None:
         self.message_keeper.stop()
+        self.message_keeper.close()
         self.aexit_context.cancel_all()
         await self._handle_stop()
         self._loop.stop()

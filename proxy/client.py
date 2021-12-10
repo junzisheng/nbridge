@@ -49,7 +49,7 @@ class ProxyRevoker(Revoker):
             except CancelledError:
                 pass
             except:
-                from bridge_proxy.server import ServerRevoker
+                from proxy.server import ServerRevoker
                 self.protocol.rpc_call(
                     ServerRevoker.call_session_disconnect
                 )
@@ -66,7 +66,7 @@ class ProxyRevoker(Revoker):
         if self._task and not self._task.done():
             self._task.cancel()
             # cancel 导致tunnel还为建立， 所以需要这里调用ready
-            from bridge_proxy.server import ServerRevoker
+            from proxy.server import ServerRevoker
             self.protocol.rpc_call(
                 ServerRevoker.call_client_ready
             )

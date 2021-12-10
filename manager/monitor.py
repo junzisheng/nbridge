@@ -7,7 +7,7 @@ import json
 from prettytable import PrettyTable
 
 from protocols import BaseProtocol
-from bridge_manager.manager_worker import WorkerStruct
+from manager.manager_worker import WorkerStruct
 from revoker import Revoker
 from state import State
 
@@ -49,7 +49,7 @@ class MonitorServer(BaseProtocol):
     def build_state(cls) -> Dict:
         state: Dict[str, Dict[int, Dict[str, int]]] = defaultdict(lambda: defaultdict(dict))
         for pid, worker in cls.get_workers().items():
-            for host_name, idle_count in worker.proxy_state_shot.items():
+            for host_name, idle_count in worker.proxy_idle_map.items():
                 state[host_name][pid] = idle_count
         return state
 

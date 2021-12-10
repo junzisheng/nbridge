@@ -2,6 +2,7 @@ import os
 import pathlib
 from typing import Dict
 from configparser import ConfigParser
+from functools import cached_property
 
 from pydantic import BaseSettings, BaseModel
 
@@ -54,6 +55,9 @@ def _load_server_config(_) -> dict:
                 'client': client
             })
             public_config[public_name] = Public(**section_val)
+    public_port_map = {}
+    for pubic in public_config.values():
+        public_port_map[pubic.bind_port] = pubic
     return map_chain(
         dict(meta_config),
         wrapper_prefix_key('manager_', manager_config),
@@ -61,7 +65,8 @@ def _load_server_config(_) -> dict:
         wrapper_prefix_key('monitor_', monitor_config),
         {
             'client_map': client_config,
-            'public_map': public_config
+            'public_map': public_config,
+            'public_port_map': public_port_map
         }
     )
 
@@ -91,6 +96,7 @@ class ServerSettings(BaseSettings):
 
     client_map: Dict[str, Client]
     public_map: Dict[str, Public]
+    public_port_map: Dict[int, Public]
 
     class Config:
         env_file_encoding = 'utf-8'

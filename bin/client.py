@@ -10,10 +10,10 @@ from loguru import logger
 from messager import Message, ProcessQueueMessageKeeper, broadcast_message
 from constants import CloseReason
 from aexit_context import AexitContext
-from bridge_manager.client import ClientProtocol
+from manager.client import ClientProtocol
 from worker import Event, run_worker
 from config.settings import client_settings
-from bridge_manager.manager_worker import ClientWorker
+from manager.manager_worker import ClientWorker
 from utils import loop_travel
 
 

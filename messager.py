@@ -119,7 +119,7 @@ class MessageKeeper(object):
 
     def listen(self) -> None:
         self.listen_task = self._loop.create_task(
-            self.async_listen(self.output_channel)
+            self.async_listen()
         )
 
     def send(self, message: Message) -> None:
@@ -151,12 +151,15 @@ class MessageKeeper(object):
             logger.exception(e)
             raise
 
-    async def async_listen(self, q: Union[Mqueue, Queue]) -> None:
+    async def async_listen(self) -> None:
         raise NotImplementedError
 
     def stop(self) -> None:
         if self.listen_task and not self.listen_task.done():
             self.listen_task.cancel()
+
+    def close(self) -> None:
+        pass
 
     def get(self) -> Any:
         raise NotImplementedError
@@ -174,7 +177,7 @@ class MessageKeeper(object):
 
 
 class AsyncMessageKeeper(MessageKeeper):
-    async def async_listen(self, q: Queue) -> None:
+    async def async_listen(self) -> None:
         while True:
             message = await self.get()
             self.receive(message)
@@ -188,12 +191,12 @@ class AsyncMessageKeeper(MessageKeeper):
         self.input_channel.put_nowait(item)
 
 
-class _ProcessMessageKeeper(MessageKeeper):
+class ProcessQueueMessageKeeper(MessageKeeper):
     def __init__(self, *args, **kwargs) -> None:
-        super(_ProcessMessageKeeper, self).__init__(*args, **kwargs)
+        super(ProcessQueueMessageKeeper, self).__init__(*args, **kwargs)
         self._executor: Optional[ThreadPoolExecutor] = None
 
-    async def async_listen(self, q: Union[Connection, Queue]) -> None:
+    async def async_listen(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1)
         while True:
             try:
@@ -208,28 +211,42 @@ class _ProcessMessageKeeper(MessageKeeper):
                 logger.info(e.__class__.__name__)
         self._executor.shutdown(wait=False)
 
-    def stop(self) -> None:
-        super(_ProcessMessageKeeper, self).stop()
-        if self._executor:
-            self._executor.shutdown(wait=False)
-
-
-class ProcessQueueMessageKeeper(_ProcessMessageKeeper):
     def get(self) -> Any:
         return self.output_channel.get()
 
     def put(self, item: Any) -> None:
         self.input_channel.put(item)
 
+    def stop(self) -> None:
+        super(ProcessQueueMessageKeeper, self).stop()
+        if self._executor:
+            self._executor.shutdown(wait=False)
 
-class ProcessPipeMessageKeeper(_ProcessMessageKeeper):
+
+class ProcessPipeMessageKeeper(MessageKeeper):
+    _stop = False
+
     def get(self) -> Any:
         return self.output_channel.recv()
 
+    def _data_received(self):
+        message = self.get()
+        self.receive(message)
+
+    async def async_listen(self) -> None:
+        self._loop.add_reader(
+            self.output_channel.fileno(),
+            self._data_received,
+        )
+
     def put(self, item: Any) -> None:
-        self.input_channel.send(item)
+        if not self._stop:
+            self.input_channel.send(item)
 
     def stop(self):
-        super(ProcessPipeMessageKeeper, self).stop()
+        self._stop = True
+        self._loop.remove_reader(self.output_channel.fileno())
+
+    def close(self):
         self.output_channel.close()
         self.input_channel.close()

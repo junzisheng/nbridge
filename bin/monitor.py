@@ -8,7 +8,7 @@ sys.path.insert(0, s)
 from loguru import logger
 
 from settings import settings
-from bridge_manager.monitor import MonitorClient
+from manager.monitor import MonitorClient
 
 loop = asyncio.get_event_loop()
 

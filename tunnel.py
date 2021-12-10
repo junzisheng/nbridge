@@ -36,7 +36,7 @@ class TunnelPair(object):
 class ProxyServerTunnelPair(TunnelPair):
     def register_tunnel(self, tunnel: 'ProxyServerTunnelPair', end_point: tuple) -> None:
         assert self.owner.state.st == State.WORK_PREPARE
-        from bridge_proxy.client import ProxyRevoker
+        from proxy.client import ProxyRevoker
         super(ProxyServerTunnelPair, self).register_tunnel(tunnel)
         self.owner.state.to(State.WORK)
         self.owner.rpc_call(
@@ -51,7 +51,7 @@ class ProxyServerTunnelPair(TunnelPair):
 
     def _unregistered_tunnel(self) -> None:
         if self.registered:
-            from bridge_proxy.client import ProxyRevoker
+            from proxy.client import ProxyRevoker
             self.owner.state.to(State.WAIT_CLIENT_READY)
             self.owner.rpc_call(
                 ProxyRevoker.call_disconnect_session
@@ -62,7 +62,7 @@ class ProxyServerTunnelPair(TunnelPair):
 
 class ProxyClientTunnelPair(TunnelPair):
     def unregister_tunnel(self) -> None:
-        from bridge_proxy.server import ServerRevoker
+        from proxy.server import ServerRevoker
         if self.registered:
             self.owner.rpc_call(
                 ServerRevoker.call_client_ready
@@ -70,7 +70,7 @@ class ProxyClientTunnelPair(TunnelPair):
         super(ProxyClientTunnelPair, self).unregister_tunnel()
 
     def _unregistered_tunnel(self) -> None:
-        from bridge_proxy.server import ServerRevoker
+        from proxy.server import ServerRevoker
         if self.tunnel:
             self.owner.rpc_call(
                 ServerRevoker.call_session_disconnect
@@ -85,7 +85,7 @@ class LocalTunnelPair(TunnelPair):
         super(LocalTunnelPair, self)._unregistered_tunnel()
 
     def forward(self, data: bytes) -> None:
-        from bridge_proxy.server import ServerRevoker
+        from proxy.server import ServerRevoker
         if self.registered:
             self.tunnel.owner.rpc_call(
                 ServerRevoker.call_forward,
@@ -96,7 +96,7 @@ class LocalTunnelPair(TunnelPair):
 class PublicTunnelPair(TunnelPair):
     def forward(self, data: bytes) -> None:
         if self.registered:
-            from bridge_proxy.client import ProxyRevoker
+            from proxy.client import ProxyRevoker
             self.tunnel.owner.rpc_call(
                 ProxyRevoker.call_forward,
                 data

@@ -1,10 +1,11 @@
 from typing import Tuple, Dict, Optional, List, Type, Union
 import os
+import sys
 from itertools import chain
 from collections import defaultdict
 from multiprocessing import Process
 from multiprocessing.connection import Connection
-from multiprocessing.reduction import recv_handle
+from multiprocessing.reduction import recv_handle, recvfds
 from multiprocessing import Queue as process_Queue
 from functools import partial
 import asyncio
@@ -21,9 +22,9 @@ from worker import ProcessWorker, Event
 from state import State
 from utils import safe_remove
 from messager import Message, ProcessQueueMessageKeeper, ProcessPipeMessageKeeper, MessageKeeper
-from bridge_proxy.server import ProxyServer
-from bridge_proxy.client import ProxyClient
-from bridge_public.protocol import PublicProtocol
+from proxy.server import ProxyServer
+from proxy.client import ProxyClient
+from public.protocol import PublicProtocol
 from config.settings import server_settings, client_settings
 
 
@@ -37,7 +38,7 @@ class WorkerStruct(object):
         self.port = port
         self.process = process
         self.message_keeper = message_keeper
-        self.proxy_state_shot: Dict[str, int] = defaultdict(lambda :0)
+        self.proxy_idle_map: Dict[str, int] = defaultdict(lambda: 0)
 
     def put(self, message: Message) -> None:
         self.message_keeper.send(message)
@@ -45,30 +46,36 @@ class WorkerStruct(object):
 
 class ManagerWorker(ProcessWorker):
     def __init__(
-            self, keeper_cls: Type[MessageKeeper], input_channel: Union[Connection, process_Queue],
-            output_channel: Union[Connection, process_Queue], socket_recv_conn: Connection
+        self, keeper_cls: Type[MessageKeeper], input_channel: Union[Connection, process_Queue],
+        output_channel: Union[Connection, process_Queue], public_sock_channel: Connection
     ) -> None:
         super().__init__(keeper_cls, input_channel, output_channel)
         self.token_map: Dict[str, str] = {}
         self.proxy_map: Dict[str, List[ProxyServer]] = defaultdict(list)
-        self.socket_recv_conn = socket_recv_conn
+        self.public_sock_channel = public_sock_channel
         self.proxy_server: Optional[Server] = None
 
     def start(self) -> None:
-        def factory():
-            return ProxyServer(lambda h: self.token_map.get(h),  self.report_proxy_state)
-
+        def _get_token(client_name: str) -> Optional[str]:
+            return self.token_map.get(client_name)
+        
         self.proxy_server = self._loop.run_until_complete(
             self._loop.create_server(
-                factory,
+                partial(ProxyServer, _get_token, self._on_public_state_change),
                 host=server_settings.proxy_bind_host,
                 port=0
             )
         )
         self.message_keeper.put(self.proxy_server.sockets[0].getsockname()[1])
-        self.aexit_context.create_task(
-            self.listen_receive_socket()
-        )
+
+        f = self.aexit_context.create_future()
+        # 接收public socket
+        self.listen_receive_public_sock()
+
+        @f.add_done_callback
+        def on_exit(_):
+            self._loop.remove_reader(self.public_sock_channel.fileno())
+            self.public_sock_channel.close()
 
     async def _handle_stop(self) -> None:
         self.token_map = {}
@@ -88,107 +95,100 @@ class ManagerWorker(ProcessWorker):
             await asyncio.gather(*waiters)
         logger.info(f'Worker Process【{self.pid}】: Proxy Server Closed')
 
-    async def listen_receive_socket(self) -> None:
-        """接收public请求并序列为socket"""
-        def _receive_socket() -> tuple:
-            fd: int = recv_handle(self.socket_recv_conn)
-            _host_name, _end_point = self.socket_recv_conn.recv()
-            # socket.fromfd 复制了fd 这里关闭
-            _sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM), _host_name, _end_point
-            os.close(fd)
-            return _sock
+    def listen_receive_public_sock(self) -> None:
+        if sys.platform == 'win32':
+            self._loop.add_reader(self.public_sock_channel.fileno(), self._on_new_public_sock)
+        else:
+            def _on_new_public_sock():
+                self._on_new_public_sock(recvfds(listener_sock, 1)[0])
+            listener_sock = socket.fromfd(self.public_sock_channel.fileno(), socket.AF_UNIX, socket.SOCK_STREAM)
+            self._loop.add_reader(listener_sock.fileno(), _on_new_public_sock)
 
-        while True:
-            try:
-                sock, host_name, end_point = await self._loop.run_in_executor(None, _receive_socket)
-                proxy = self.require_proxy(host_name)
-                if proxy:
-                    proxy.state.to(State.WORK_PREPARE)
-                    task = self.aexit_context.create_task(self._loop.create_connection(
-                        partial(PublicProtocol, end_point, proxy),
-                        sock=sock
-                    ))
+    def _send_message_to_change_manager_state_shot(self, client_name: str, idle: bool) -> None:
+        """通知父进程proxy状态"""
+        self.message_keeper.send(
+            Message(
+                Event.PROXY_STATE_CHANGE,
+                self.pid,
+                client_name,
+                idle
+            )
+        )
 
-                    @task.add_done_callback
-                    def if_fail(f):
-                        try:
-                            f.result()
-                        except:
-                            if proxy.state.st == State.WORK_PREPARE:
-                                proxy.state.to(State.IDLE)
-                            self.message_keeper.send(
-                                Message(
-                                    Event.PROXY_STATE_CHANGE,
-                                    self.pid,
-                                    host_name,
-                                    True
-                                )
-                            )
-                else:
-                    sock.close()
-                    self.message_keeper.send(
-                        Message(
-                            Event.PROXY_STATE_CHANGE,
-                            self.pid,
-                            host_name,
-                            False
-                        )
-                    )
-            except EOFError:
-                # 主进程退出，这里正好退出循环，否则子进程无法正常关闭
-                break
+    def _on_new_public_sock(self, fd: int) -> None:
+        _sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+        # socket.fromfd 复制了fd 这里关闭
+        os.close(fd)
+        public_port = _sock.getsockname()[1]
+        public_config = server_settings.public_port_map[public_port]
+        proxy = self.require_proxy(public_config.client.name)
+        if not proxy:
+            _sock.close()
+            self._send_message_to_change_manager_state_shot(public_config.client.name, True)
+        else:
+            proxy.state.to(State.WORK_PREPARE)
+            task = self.aexit_context.create_task(self._loop.create_connection(
+                partial(
+                    PublicProtocol,
+                    (public_config.local_host, public_config.local_port),
+                    proxy
+                ),
+                sock=_sock
+            ))
 
-    def current_proxy_state_map(self, host_name: str) -> Dict[str, int]:
+            @task.add_done_callback
+            def if_fail(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.exception(e)
+                    if proxy.state.st == State.WORK_PREPARE:
+                        proxy.state.to(State.IDLE)
+
+    def _on_public_state_change(self, pre_state: str, state: str, protocol: ProxyServer) -> None:
+        """处理proxy状态变更"""
+        client_name = protocol.client_name
+        if pre_state == State.WAIT_AUTH and state == State.IDLE:
+            self.proxy_map[client_name].append(protocol)
+            logger.info(f'Proxy Client【{protocol.client_name}】Connect')
+        elif pre_state != State.DISCONNECT and state == State.DISCONNECT:
+            if safe_remove(self.proxy_map[client_name], protocol):
+                logger.info(f'Proxy Client【{protocol.client_name}】DisConnected')
+
+        if pre_state != State.IDLE and state == State.IDLE:
+            self._send_message_to_change_manager_state_shot(protocol.client_name, True)
+
+    def current_proxy_state_map(self, client_name: str) -> Dict[str, int]:
         state_map: Dict[str, int] = defaultdict(lambda: 0)
-        for p in self.proxy_map[host_name]:
+        for p in self.proxy_map[client_name]:
             state_map[p.state.st] += 1
         return dict(state_map)
 
-    def report_proxy_state(self, pre_state: str, state: str, protocol: ProxyServer) -> None:
-        """上报proxy状态"""
-        host_name = protocol.host_name
-        if pre_state == State.WAIT_AUTH and state == State.IDLE:
-            self.proxy_map[host_name].append(protocol)
-            logger.info(f'Proxy Client【{protocol.host_name}】Connect')
-        elif pre_state != State.DISCONNECT and state == State.DISCONNECT:
-            if safe_remove(self.proxy_map[host_name], protocol):
-                logger.info(f'Proxy Client【{protocol.host_name}】DisConnected')
-
-        if pre_state != State.IDLE and state == State.IDLE:
-            self.message_keeper.send(
-                Message(
-                    Event.PROXY_STATE_CHANGE,
-                    self.pid,
-                    host_name,
-                    True
-                )
-            )
-
-    def require_proxy(self, host_name: str) -> Optional[ProxyServer]:
-        proxy_server_list = self.proxy_map[host_name]
+    def require_proxy(self, client_name: str) -> Optional[ProxyServer]:
+        proxy_server_list = self.proxy_map[client_name]
         for proxy in proxy_server_list:
             if proxy.state.st == State.IDLE:
                 return proxy
         return None
 
-    def on_message_client_connect(self, token: str, host_name: str) -> None:
-        self.token_map[host_name] = token
+    def on_message_client_connect(self, token: str, client_name: str) -> None:
+        self.token_map[client_name] = token
 
-    def on_message_client_disconnect(self, host_name: str) -> None:
-        if host_name in self.token_map:
-            del self.token_map[host_name]
-            for protocol in self.proxy_map[host_name]:
+    def on_message_client_disconnect(self, client_name: str) -> None:
+        if client_name in self.token_map:
+            del self.token_map[client_name]
+            for protocol in self.proxy_map[client_name]:
                 protocol.rpc_call(
                     Revoker.call_set_close_reason,
                     CloseReason.CLIENT_DISCONNECT
                 )
                 protocol.transport.close()
-            del self.proxy_map[host_name]
+            del self.proxy_map[client_name]
 
     def on_message_query_proxy_state(self) -> Tuple[Dict, int]:
         host_map = {}
-        for host_name in self.proxy_map.keys():
-            host_map[host_name] = self.current_proxy_state_map(host_name)
+        for client_name in self.proxy_map.keys():
+            host_map[client_name] = self.current_proxy_state_map(client_name)
         return host_map, self.pid
 
 
