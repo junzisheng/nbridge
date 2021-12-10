@@ -7,7 +7,7 @@ import json
 from prettytable import PrettyTable
 
 from protocols import BaseProtocol
-from bridge_manager.manager_woker import WorkerStruct
+from bridge_manager.manager_worker import WorkerStruct
 from revoker import Revoker
 from state import State
 

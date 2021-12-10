@@ -5,46 +5,39 @@ from loguru import logger
 
 from revoker import Revoker, AuthRevoker, PingPongRevoker
 from protocols import BaseProtocol
-from settings import settings
-from worker import Event, create_event
+from config.settings import client_settings
 
 
 class ClientRevoker(Revoker):
     authed = False
 
-    def call_session_created(self, token: str, proxy_port_list: List[int]) -> None:
+    def call_session_created(self, token: str, proxy_ports: List[int], proxy_size: int) -> None:
         self.authed = True
-        logger.info(f'【{self.protocol.host_name}】Manager Server Session Created')
-        for port in proxy_port_list:
-            self.protocol.queue.put_nowait(create_event(
-                Event.PROXY_CREATE,
-                port=port,
-                token=token
-            ))
+        logger.info(f'【{client_settings.name}】Manager Server Session Created')
+        self.protocol.on_manager_session_made(
+            token,
+            proxy_ports,
+            proxy_size
+        )
 
 
 class ClientProtocol(BaseProtocol):
     revoker_bases = (ClientRevoker, PingPongRevoker)
 
-    def __init__(self, queue: Queue, host_name: str) -> None:
+    def __init__(self, *, on_manager_session_made: callable, on_manager_session_lost: callable) -> None:
         super().__init__()
-        self.queue = queue
-        self.host_name = host_name
+        self.on_manager_session_made = on_manager_session_made
+        self.on_manager_session_lost = on_manager_session_lost
 
     def on_connection_made(self) -> None:
         self.rpc_call(
             AuthRevoker.call_auth,
-            settings.token,
-            self.host_name
+            client_settings.token,
+            client_settings.name,
         )
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
         if self.revoker.authed:
-            self.queue.put_nowait(
-                create_event(
-                    Event.MANAGER_DISCONNECT,
-                    self.close_reason
-                )
-            )
+            self.on_manager_session_lost(self.close_reason)
 
 

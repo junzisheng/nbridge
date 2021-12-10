@@ -5,8 +5,9 @@ from asyncio import Future, Task, CancelledError
 from loguru import logger
 
 from protocols import BaseProtocol
-from revoker import AuthRevoker, Revoker, PingPongRevoker, PingPong
+from revoker import AuthRevoker, Revoker, PingPongRevoker
 from tunnel import LocalTunnelPair, ProxyClientTunnelPair
+from config.settings import client_settings
 
 
 class LocalProtocol(BaseProtocol):
@@ -26,7 +27,7 @@ class ProxyRevoker(Revoker):
     _task: Optional[Task] = None
 
     def call_auth_success(self):
-        self.protocol.auth_success_waiter.set_result(self.protocol)
+        self.protocol.on_proxy_session_made()
 
     def call_forward(self, body: bytes) -> None:
         if self.protocol.tunnel.registered:
@@ -72,28 +73,40 @@ class ProxyRevoker(Revoker):
         else:
             self.protocol.tunnel.unregister_tunnel()
 
+    def on_protocol_close(self) -> None:
+        self.buffer = b''
+        if self._task and not self._task.cancelled():
+            self._task.cancel()
 
-class ProxyClient(BaseProtocol, PingPong):
+
+class ProxyClient(BaseProtocol):
     revoker_bases = (ProxyRevoker, PingPongRevoker)
 
-    def __init__(self, host_name: str, token: str) -> None:
+    def __init__(
+            self, *, on_proxy_session_made: callable, on_proxy_session_lost, token: str
+     ) -> None:
         super().__init__()
-        self.host_name = host_name
+        self._on_proxy_session_made = on_proxy_session_made
+        self.on_proxy_session_lost = on_proxy_session_lost
         self.token = token
         self.tunnel = ProxyClientTunnelPair(self)
         self.auth_success_waiter = self._loop.create_future()
         self.disconnect_waiter = self._loop.create_future()
+        self.session_created = False
+
+    def on_proxy_session_made(self):
+        self.session_created = True
+        self._on_proxy_session_made(self)
 
     def on_connection_made(self) -> None:
         self.rpc_call(
             AuthRevoker.call_auth,
             self.token,
-            self.host_name
+            client_settings.name,
         )
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
         self.tunnel.unregister_tunnel()
-        self.revoker.buffer = b''
-        if self.auth_success_waiter.done():
-            self.disconnect_waiter.set_result(self)
+        if self.session_created:
+            self.on_proxy_session_lost(self)
 

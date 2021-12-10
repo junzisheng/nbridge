@@ -1,6 +1,5 @@
 from typing import Dict, List, Optional
 from collections import defaultdict
-import sys
 import signal
 from types import FrameType
 import threading
@@ -10,27 +9,26 @@ from asyncio import Future, futures
 from asyncio.base_events import Server as Aserver
 from multiprocessing import Pipe, Process, Queue as process_queue
 from multiprocessing.reduction import recv_handle, send_handle
-from functools import partial
+from functools import partial, cached_property
 
 import socket
 from loguru import logger
 import uvloop
-s = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, s)
 
 from state import State
 from common_bases import Closer
 from constants import CloseReason, HANDLED_SIGNALS
 from worker import Event, run_worker
 from revoker import Revoker
+from registry import Registry
 from aexit_context import AexitContext
-from messager import ProcessPipeMessageKeeper, ProcessQueueMessageKeeper, Message, gather_message
+from messager import ProcessPipeMessageKeeper, ProcessQueueMessageKeeper, Message, gather_message, broadcast_message
 from bridge_manager.server import ManagerServer
-from bridge_manager.manager_woker import WorkerStruct, ManagerWorker
+from bridge_manager.manager_worker import WorkerStruct, ManagerWorker
 from bridge_manager.monitor import MonitorServer
 from bridge_public.protocol import start_public_server
-from settings import settings
-
+from utils import safe_remove
+from config.settings import server_settings
 
 uvloop.install()
 
@@ -44,6 +42,7 @@ class Server(object):
         self.aexit = AexitContext()
         self.manager_server: Optional[Aserver] = None
         self.public_servers: List[socket.socket] = []
+        self.manager_registry = Registry()
 
     def run(self) -> None:
         self.install_signal_handlers()
@@ -54,54 +53,87 @@ class Server(object):
         self.run_public_server()
         self._loop.run_forever()
         self._loop.close()
+        logger.info('Closed!')
+
+    @cached_property
+    def message_keepers(self) -> List[ProcessPipeMessageKeeper]:
+        return [w.message_keeper for w in self.workers.values()]
+
+    @cached_property
+    def proxy_ports(self):
+        return [w.port for w in self.workers.values()]
+
+    def _on_manager_session_made(
+            self, protocol: ManagerServer, token: str, process_notify_waiter: Future
+    ) -> None:
+        host_name = protocol.host_name
+
+        gather = gather_message(
+            self.message_keepers,
+            Event.CLIENT_CONNECT,
+            token=token,
+            host_name=host_name
+        )
+        futures._chain_future(gather, process_notify_waiter)
+
+    def _on_manager_session_lost(self, protocol: ManagerServer) -> None:
+        host_name = protocol.host_name
+        broadcast_message(self.message_keepers, Event.CLIENT_DISCONNECT, host_name=host_name)
+
+    def _receive_public_socket(self, host_name: str, end_point: tuple, sock: socket.socket) -> None:
+        def get_sort_list():
+            struct_list = list(self.workers.values())
+            sort_list = []
+            for stru in struct_list:
+                sort_list.append(
+                    [stru.proxy_state_shot[host_name],
+                     sum(
+                         [x for x in stru.proxy_state_shot.values()]
+                     ), stru.pid]
+                )
+            sort_list.sort(key=lambda x: [x[0], x[1]], reverse=True)
+            return sort_list
+        sort_list = get_sort_list()
+        receiver = sort_list[0] if sort_list else None
+        if receiver and receiver[0] > 0:
+            worker = self.workers[receiver[2]]
+            worker.proxy_state_shot[host_name] -= 1
+            try:
+                send_handle(worker.socket_input, sock.fileno(), worker.pid)
+            except Exception as e:
+                print(e)
+            worker.socket_input.send((host_name, end_point))
+        sock.close()
 
     def run_manager(self) -> None:
-        def factory():
-            session_created_waiter = self._loop.create_future()
-            session_disconnect_waiter = self._loop.create_future()
-
-            @session_created_waiter.add_done_callback
-            def on_session_created(f: Future) -> None:
-                protocol, token, waiter = f.result()  # type: ManagerServer, str, Future
-                host_name = protocol.host_name
-                self.managers[protocol.host_name] = protocol
-                gather = gather_message(
-                    self.get_keepers(),
-                    Event.CLIENT_CONNECT,
-                    token=token,
-                    host_name=host_name
-                )
-                futures._chain_future(gather, waiter)
-
-            @session_disconnect_waiter.add_done_callback
-            def on_session_disconnect(f: Future) -> None:
-                manager: ManagerServer = f.result()
-                host_name = manager.host_name
-                if host_name in self.managers:
-                    del self.managers[host_name]
-                for w in self.workers.values():
-                    w.put(
-                        Message(
-                            Event.CLIENT_DISCONNECT,
-                            host_name=host_name
-                        )
-                    )
-            return ManagerServer(session_created_waiter, session_disconnect_waiter, self.workers)
-
         self.manager_server = self._loop.run_until_complete(
-            self._loop.create_server(factory, host=settings.manager_bind_host, port=settings.manager_bind_port)
+            self._loop.create_server(
+                partial(
+                    ManagerServer,
+                    manager_registry=self.manager_registry,
+                    on_session_made=self._on_manager_session_made,
+                    on_session_lost=self._on_manager_session_lost,
+                    proxy_ports=self.proxy_ports,
+                ),
+                host=server_settings.manager_bind_host,
+                port=server_settings.manager_bind_port,
+            )
         )
-        logger.info(f'Manager Server - [{settings.manager_bind_host}:{settings.manager_bind_port}] - '
+        logger.info(f'Manager Server - [{server_settings.manager_bind_host}:{server_settings.manager_bind_port}] - '
                     f'{os.getpid()}: Started')
 
     def run_public_server(self) -> None:
-        for host_name, host, port in settings.client_endpoint_default:
+        for name, public in server_settings.public_map.items():
             s = start_public_server(
-                ('0.0.0.0', 444),
-                partial(self.receive_public_socket, host_name, (host, port)),
+                ('0.0.0.0', public.bind_port),
+                partial(
+                    self._receive_public_socket,
+                    public.client.name,
+                    (public.local_host, public.local_port)
+                ),
             )
             bind_port = s.getsockname()[1]
-            logger.info(f'Public Server -【{bind_port}】 -> 【{host_name}】({host}:{port}) : Started')
+            logger.info(f'Public Server -【{bind_port}】 -> 【{name}】({public.local_host}:{public.local_port}) : Started')
             self.public_servers.append(s)
 
     def run_monitor(self):
@@ -117,9 +149,6 @@ class Server(object):
         #     )
         # )
 
-    def get_keepers(self) -> List[ProcessPipeMessageKeeper]:
-        return [w.message_keeper for w in self.workers.values()]
-
     async def loop_monitor(self):
         while True:
             from prettytable import PrettyTable
@@ -129,7 +158,7 @@ class Server(object):
             table_dict = defaultdict(dict)
             pstr = ["="*50]
             for host_map, pid in await gather_message(
-                self.get_keepers(),
+                self.message_keepers,
                 Event.QUERY_PROXY_STATE
             ):
                 for host, state in host_map.items():
@@ -151,53 +180,31 @@ class Server(object):
             print("\n".join(pstr))
 
     def run_worker(self) -> None:
-        for idx in range(settings.workers):
+        for idx in range(server_settings.workers):
+            # socket 文件描述符传递通道
             socket_output, socket_input = Pipe()
+            # 进程通信通道
             input_queue, output_queue = process_queue(), process_queue()
             message_keeper = ProcessQueueMessageKeeper(self, input_queue, output_queue)
-            pro = Process(target=run_worker,
-                          args=(ManagerWorker, ProcessQueueMessageKeeper, output_queue, input_queue, socket_output)
-                          )
+            pro = Process(
+                target=run_worker,
+                args=(ManagerWorker, ProcessQueueMessageKeeper, output_queue, input_queue, socket_output)
+            )
             pro.daemon = True
             pro.start()
             socket_output.close()
-
             # 进程随机port启动proxy服务，这里获取port
             port = message_keeper.get()
 
             message_keeper.listen()
-            self.workers[pro.pid] = WorkerStruct(socket_input=socket_input,
-                                                 pid=pro.pid, process=pro,
-                                                 message_keeper=message_keeper,
-                                                 port=port)
-            logger.info(f'Proxy Server - 【{settings.proxy_bind_host}:{port}】 - {os.getpid()}: Started')
-
-    def receive_public_socket(self, host_name: str, end_point: tuple, sock: socket.socket) -> None:
-        def get_sort_list():
-            struct_list = list(self.workers.values())
-            sort_list = []
-            for stru in struct_list:
-                sort_list.append(
-                    [stru.proxy_state_shot[host_name],
-                     sum(
-                         [x for x in stru.proxy_state_shot.values()]
-                     ), stru.pid]
-                )
-            sort_list.sort(key=lambda x: [x[0], x[1]], reverse=True)
-            return sort_list
-        sort_list = get_sort_list()
-        receiver = sort_list[0] if sort_list else None
-        if receiver and receiver[0] > 0:
-            worker = self.workers[receiver[2]]
-            # 这里先减去，防止并发导致多个请求进入一个进程，等后面进程重新上报新的数据覆盖
-            worker.proxy_state_shot[host_name] -= 1
-            try:
-                send_handle(worker.socket_input, sock.fileno(), worker.pid)
-            except Exception as e:
-                print(e)
-            worker.socket_input.send((host_name, end_point))
-        else:
-            sock.close()
+            self.workers[pro.pid] = WorkerStruct(
+                socket_input=socket_input,
+                pid=pro.pid,
+                process=pro,
+                message_keeper=message_keeper,
+                port=port
+            )
+            logger.info(f'Proxy Server - 【{server_settings.proxy_bind_host}:{port}】 - {pro.pid}: Started')
 
     def on_message_proxy_state_change(self, pid: int, host_name: str, is_idle: bool) -> None:
         self.workers[pid].proxy_state_shot[host_name] += 1 if is_idle else -1
@@ -237,7 +244,7 @@ class Server(object):
             worker.message_keeper.stop()
             logger.info(f'Process 【{worker.pid}】Closed')
         # 关闭manager client
-        for m in self.managers.values():
+        for m in self.manager_registry.all_registry().values():
             m.rpc_call(
                 Revoker.call_set_close_reason,
                 CloseReason.SERVER_CLOSE,
@@ -250,7 +257,6 @@ class Server(object):
         logger.info('Manager Server Closed')
 
         self._loop.stop()
-        logger.info('Closed!')
 
 
 if __name__ == '__main__':

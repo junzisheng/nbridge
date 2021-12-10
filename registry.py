@@ -5,20 +5,22 @@ class Registry(object):
     def __init__(self):
         self._registry = {}
 
-    def is_registered(self, host_name: str) -> bool:
-        return host_name in self._registry
+    def all_registry(self) -> dict:
+        return self._registry
 
-    def register(self, host_name: str, protocol: BaseProtocol) -> bool:
-        if host_name in self._registry:
-            raise
-        self._registry[host_name] = protocol
+    def is_registered(self, key: str) -> bool:
+        return key in self._registry
+
+    def register(self, key: str, protocol: BaseProtocol) -> bool:
+        if key in self._registry:
+            return False
+        self._registry[key] = protocol
         return True
 
-    def unregister(self, host_name: str) -> bool:
+    def unregister(self, key: str) -> bool:
         try:
-            del self._registry[host_name]
+            del self._registry[key]
             return True
         except KeyError:
             return False
-
 

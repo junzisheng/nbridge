@@ -1,131 +1,108 @@
 from typing import List, Optional, Iterable
-import os
 import asyncio
-from asyncio import Queue, Task, Future
-from multiprocessing import Pipe, Queue as process_Queue
+from asyncio import Future
+from multiprocessing import Queue
 from multiprocessing import Process
 from functools import partial
-from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
 
-from messager import ProcessPipeMessageKeeper, Message, ProcessQueueMessageKeeper
+from messager import Message, ProcessQueueMessageKeeper, broadcast_message
 from constants import CloseReason
+from aexit_context import AexitContext
 from bridge_manager.client import ClientProtocol
 from worker import Event, run_worker
-from sub_process import get_subprocess
-from settings import settings
-from bridge_manager.manager_woker import ClientWorker
+from config.settings import client_settings
+from bridge_manager.manager_worker import ClientWorker
 from utils import loop_travel
-
-host_name = 'test_host'
 
 
 class Client(object):
     def __init__(self) -> None:
         self._loop = asyncio.get_event_loop()
-        self.queue = Queue()  # 和client通信
-        self.message_keepers: [ProcessPipeMessageKeeper] = []
+        self.message_keepers: [ProcessQueueMessageKeeper] = []
         self.processes: List[Process] = []
-        self._loop.set_default_executor(
-            ThreadPoolExecutor(max_workers=min(settings.workers * 2 + 1, 32, (os.cpu_count() or 1)+4))
-        )
         self.iter_message_keeper: Optional[Iterable] = None
-        self.tasks: List[Task] = []
+        self.aexit_context = AexitContext()
 
     def run(self) -> None:
         self.run_worker()
         self.run_client()
-        self.tasks.append(self._loop.create_task(self.listen_client_queue()))
         self._loop.run_forever()
 
     def run_client(self, retries=0, delay=0) -> None:
-        async def _create_connection(delay=0):
+        async def _create_connection():
             if delay > 0:
                 await asyncio.sleep(delay)
             return await self._loop.create_connection(
-                partial(ClientProtocol, self.queue, host_name),
-                host=settings.manager_remote_host,
-                port=settings.manager_bind_port,
+                partial(
+                    ClientProtocol,
+                    on_manager_session_made=self._on_manager_session_made,
+                    on_manager_session_lost=self._on_manager_session_lost
+                ),
+                host=client_settings.server_host,
+                port=client_settings.server_port,
             )
 
-        task = self._loop.create_task(
-            _create_connection(delay)
+        task = self.aexit_context.create_task(
+            _create_connection()
         )
-        self.tasks.append(task)
 
         @task.add_done_callback
         def callback(f: Future) -> None:
-            self.tasks.remove(task)
             nonlocal retries
             try:
                 _, p = f.result()
-            except Exception as e:
+            except:
                 retries += 1
-                logger.debug(f'【{host_name}】Manager Server connected failed;retry {retries} times')
+                logger.debug(f'【{client_settings.name}】Manager Server Connected Failed - retry {retries} times')
                 self.run_client(retries, 1)
 
     def run_worker(self) -> None:
-        for idx in range(settings.workers):
-            server_output, server_input = Pipe(False)
-            client_output, client_input = Pipe(False)
-
-            message_keeper = ProcessPipeMessageKeeper(self, server_input, client_output)
+        for idx in range(client_settings.workers):
+            input_queue, output_queue = Queue(), Queue()
+            message_keeper = ProcessQueueMessageKeeper(self, input_queue, output_queue)
             self.message_keepers.append(message_keeper)
-            pro = get_subprocess(run_worker, ClientWorker, ProcessPipeMessageKeeper, client_input, server_output)
+            pro = Process(
+                target=run_worker,
+                args=(ClientWorker, ProcessQueueMessageKeeper, output_queue, input_queue)
+            )
+            pro.daemon = True
             pro.start()
             self.processes.append(pro)
-            server_output.close()
-            client_input.close()
-
             message_keeper.listen()
         self.iter_message_keeper = loop_travel(self.message_keepers)
 
-    async def listen_client_queue(self) -> None:
-        while True:
-            event, args, kwargs = await self.queue.get()  # type: str, tuple, dict
-            try:
-                getattr(self, 'on_client_' + event.lower())(*args, **kwargs)
-            except Exception as e:
-                logger.exception(e)
-
-    def on_client_proxy_create(self, port: int, token: str) -> None:
+    def _on_manager_session_made(self, token: str, proxy_ports: List[int], size: int) -> None:
         """manager连接成功，通知子进程连接proxy"""
-        message_keeper: ProcessPipeMessageKeeper = next(self.iter_message_keeper)
-        message_keeper.send(
-            Message(
-                Event.PROXY_CREATE, host_name, port, token, size=settings.worker_pool_size
+        for port in proxy_ports:
+            message_keeper: ProcessQueueMessageKeeper = next(self.iter_message_keeper)
+            message_keeper.send(
+                Message(
+                    Event.PROXY_CREATE, port, token, size=size
+                )
             )
-        )
 
-    def on_client_manager_disconnect(self, reason: int) -> None:
+    def _on_manager_session_lost(self, reason: int) -> None:
         """manager 断开连接"""
-        self.broadcast_process(
-            Message(Event.MANAGER_DISCONNECT)
-        )
+        broadcast_message(self.message_keepers, Event.MANAGER_DISCONNECT)
         if reason == CloseReason.UN_EXPECTED:
-            logger.info(f'【{host_name}】disconnected unexpected retry')
+            logger.info(f'【{client_settings.name}】disconnected unexpected retry')
             self.run_client()
         if reason == CloseReason.MANAGER_ALREADY_CONNECTED:
-            logger.info(f'【{host_name}】already connected, close ~~')
+            logger.info(f'【{client_settings.name}】already connected, close ~~')
             self.exit()
         elif reason == CloseReason.AUTH_FAIL:
-            logger.info(f'【{host_name}】auth fail, close ~~')
+            logger.info(f'【{client_settings.name}】auth fail, close ~~')
             self.exit()
         elif reason == CloseReason.PING_TIMEOUT:
-            logger.info(f'【{host_name}】ping timeout, retry')
+            logger.info(f'【{client_settings.name}】ping timeout, retry')
             self.run_client()
-
-    def broadcast_process(self, message: Message) -> None:
-        for message_keeper in self.message_keepers:
-            message_keeper.send(message)
 
     def exit(self):
         for pro in self.processes:
             pro.terminate()
-        for task in self.tasks:
-            if not task.done():
-                task.cancel()
+        self.aexit_context.cancel_all()
         self._loop.stop()
 
 

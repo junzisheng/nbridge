@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from settings import settings
 from constants import CloseReason
 from utils import ignore
 if TYPE_CHECKING:
@@ -33,9 +32,11 @@ class Revoker(object):
     def call_set_close_reason(self, reason) -> None:
         self.protocol.set_close_reason(reason)
 
+    def on_protocol_close(self) -> None:
+        pass
+
 
 class AuthRevoker(Revoker):
-    TIMEOUT = 3
     TOKEN = ""
     authed = False
 
@@ -63,10 +64,8 @@ class AuthRevoker(Revoker):
         else:
             super().call(m, *args, **kwargs)
 
-    def get_token(self, host_name: str) -> str:
-        if not self.TOKEN:
-            raise RuntimeError('TOKEN is blank')
-        return self.TOKEN
+    def get_token(self, host_name: str) -> Optional[str]:
+        raise NotImplementedError
 
     def _on_timeout(self) -> None:
         self._auth_fail()
@@ -103,7 +102,7 @@ class PingPongRevoker(Revoker):
 
 class PingPong(object):
     last_pong = True
-    ping_interval = settings.heart_check_interval
+    ping_interval = 3
 
     def ping(self):
         if not self.last_pong:

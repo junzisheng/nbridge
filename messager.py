@@ -93,6 +93,13 @@ def gather_message(
     return asyncio.gather(*gather)
 
 
+def broadcast_message(
+    keepers: List['MessageKeeper'], event, *args, **kwargs
+) -> None:
+    for keep in keepers:
+        keep.send(Message(event, *args, **kwargs))
+
+
 class MessageKeeper(object):
     def __init__(self, receiver: Any, input_channel: Union[Queue, Mqueue, Connection],
                  output_channel: Union[Queue, Mqueue, Connection],

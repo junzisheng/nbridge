@@ -4,10 +4,11 @@ from protocols import BaseProtocol
 from revoker import AuthRevoker, PingPongRevoker, PingPong
 from state import State
 from tunnel import ProxyServerTunnelPair
-from settings import settings
+from config.settings import server_settings
 
 
 class ServerRevoker(AuthRevoker):
+    TIMEOUT = 3
     def get_token(self, host_name: str) -> str:
         return self.protocol.get_token(host_name)
 
@@ -35,7 +36,7 @@ class ProxyState(State):
 
 class ProxyServer(BaseProtocol, PingPong):
     revoker_bases = (ServerRevoker, PingPongRevoker)
-    ping_interval = settings.heart_check_interval
+    ping_interval = server_settings.heart_check_interval
 
     def __init__(self, get_token: callable, report_state: callable) -> None:
         super().__init__()

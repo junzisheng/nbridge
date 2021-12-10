@@ -56,6 +56,7 @@ class BaseProtocol(Protocol):
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.on_connection_lost(exc)
+        self.revoker.on_protocol_close()
         self.aexit_context.cancel_all()
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
