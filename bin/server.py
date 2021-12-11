@@ -1,8 +1,5 @@
 from typing import Dict, List, Optional
 from collections import defaultdict
-import signal
-from types import FrameType
-import threading
 import os
 import asyncio
 from asyncio import Future, futures
@@ -13,46 +10,34 @@ from functools import partial, cached_property
 
 import socket
 from loguru import logger
-import uvloop
 
 from state import State
-from common_bases import Closer
-from constants import CloseReason, HANDLED_SIGNALS
+from common_bases import Bin
+from constants import CloseReason
 from worker import Event, run_worker
 from revoker import Revoker
 from registry import Registry
-from aexit_context import AexitContext
 from messager import ProcessPipeMessageKeeper, Message, gather_message, broadcast_message
 from manager.server import ManagerServer
 from manager.manager_worker import WorkerStruct, ManagerWorker
-from manager.monitor import MonitorServer
 from public.protocol import start_public_server
 from config.settings import server_settings
 
-uvloop.install()
 
-
-class Server(object):
+class Server(Bin):
     def __init__(self) -> None:
-        self._loop = asyncio.get_event_loop()
-        self.closer = Closer(self._handle_stop)
+        super(Server, self).__init__()
         self.workers: Dict[int, WorkerStruct] = {}
         self.managers: Dict[str, ManagerServer] = {}
-        self.aexit = AexitContext()
         self.manager_server: Optional[Aserver] = None
         self.public_servers: List[socket.socket] = []
         self.manager_registry = Registry()
 
-    def run(self) -> None:
-        self.install_signal_handlers()
-        self.closer.run()
+    def start(self) -> None:
         self.run_worker()
         self.run_manager()
         self.run_monitor()
         self.run_public_server()
-        self._loop.run_forever()
-        self._loop.close()
-        logger.info('Closed!')
 
     @cached_property
     def all_worker(self) -> List[WorkerStruct]:
@@ -70,6 +55,7 @@ class Server(object):
             self, protocol: ManagerServer, token: str, process_notify_waiter: Future
     ) -> None:
         client_name = protocol.client_name
+        self.manager_registry.register(client_name, protocol)
         gather = gather_message(
             self.message_keepers,
             Event.CLIENT_CONNECT,
@@ -132,6 +118,7 @@ class Server(object):
             self.public_servers.append(s)
 
     def run_monitor(self):
+        return
         self.aexit.create_task(
             self.loop_monitor()
         )
@@ -203,18 +190,8 @@ class Server(object):
     def on_message_proxy_state_change(self, pid: int, client_name: str, is_idle: bool) -> None:
         self.workers[pid].proxy_idle_map[client_name] += 1 if is_idle else -1
 
-    def install_signal_handlers(self) -> None:
-        if threading.current_thread() is not threading.main_thread():
-            return
-        for sig in HANDLED_SIGNALS:
-            signal.signal(sig, self.handle_exit)
-
-    def handle_exit(self, sig: signal.Signals, frame: FrameType) -> None:
-        self.closer.call_close()
-
-    async def _handle_stop(self) -> None:
+    async def do_handle_stop(self) -> None:
         waiter_list = []
-        self.aexit.cancel_all()
         # 关闭manager server
         if self.manager_server:
             self.manager_server.close()
@@ -233,7 +210,7 @@ class Server(object):
             worker.process.join()
             worker.socket_input.close()
             worker.message_keeper.close()
-            logger.info(f'Process 【{worker.pid}】Closed')
+            logger.info(f'Process【{worker.pid}】Closed')
         # 关闭manager client
         for m in self.manager_registry.all_registry().values():
             m.rpc_call(
@@ -246,7 +223,6 @@ class Server(object):
         if waiter_list:
             await asyncio.gather(*waiter_list)
         logger.info('Manager Server Closed')
-        self._loop.stop()
 
 
 if __name__ == '__main__':

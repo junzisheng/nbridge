@@ -51,7 +51,6 @@ class ManagerServer(BaseProtocol, PingPong):
             self.session_created = True
             temp_token = str(uuid.uuid4())  # 随机生成token
             self.client_name = client_name
-            self.manager_registry.register(client_name, self)
             # 这里需要等到worker收到消息更新token之后才能给客户端通知，
             # 不然可能出现客户端先收到消息，进行proxy client连接，但是proxy server还未接收到token
             process_notify_waiter = self.aexit_context.create_future()

@@ -4,9 +4,11 @@ import sys
 from asyncio import Future
 import json
 
+from loguru import logger
+
 from prettytable import PrettyTable
 
-from protocols import BaseProtocol
+from protocols import BaseProtocol, ReConnector
 from manager.manager_worker import WorkerStruct
 from revoker import Revoker
 from state import State
@@ -79,9 +81,11 @@ class MonitorServer(BaseProtocol):
 class MonitorClient(BaseProtocol):
     revoker_bases = (MonitorRevoker,)
 
-    def __init__(self, disconnect_waiter: Future) -> None:
-        super(MonitorClient, self).__init__()
-        self.disconnect_waiter = disconnect_waiter
+    def on_connection_made(self) -> None:
+        logger.info('Monitor Connect Success')
 
-    def on_connection_lost(self, exc: Optional[Exception]) -> None:
-        self.disconnect_waiter.set_result(None)
+
+class MonitorConnector(ReConnector):
+    mode = "always"
+
+

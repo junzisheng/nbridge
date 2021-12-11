@@ -1,6 +1,7 @@
 from typing import Callable, Optional, Any, Type, Tuple, TYPE_CHECKING, TypeVar, List
 import asyncio
 from typing import TYPE_CHECKING
+from functools import wraps
 
 from loguru import logger
 
@@ -52,11 +53,11 @@ class AuthRevoker(Revoker):
     def hook(self):
         _connection_lost = self.protocol.connection_lost
 
-        def connection_lost(exc: Optional[Exception]) -> None:
+        def __hook_connection_lost(exc: Optional[Exception]) -> None:
             self.timeout_task.cancel()
             _connection_lost(exc)
-        connection_lost.__doc__ = _connection_lost.__doc__
-        self.protocol.connection_lost = connection_lost
+        wraps(_connection_lost)(__hook_connection_lost)
+        self.protocol.connection_lost = __hook_connection_lost
 
     def call(self, m: str, *args, **kwargs) -> Any:
         if not self.authed and m != 'auth':

@@ -198,9 +198,13 @@ class ClientWorker(ProcessWorker):
         output_channel: Union[Connection, process_Queue]
     ) -> None:
         super(ClientWorker, self).__init__(keeper_cls, input_channel, output_channel)
-        self.running_aexit = AexitContext()
         self.protocols: List[ProxyClient] = []
         self.manager_connected = False
+
+    async def _handle_stop(self) -> None:
+        self.manager_connected = True
+        for p in self.protocols:
+            p.transport.close()
 
     def _on_proxy_session_made(self, protocol: ProxyClient) -> None:
         if self.manager_connected:
@@ -229,7 +233,7 @@ class ClientWorker(ProcessWorker):
             if delay > 0:
                 await asyncio.sleep(delay)
             return await self._loop.create_connection(factory, host=host, port=port)
-        task = self.running_aexit.create_task(delay_create())
+        task = self.aexit_context.create_task(delay_create())
 
         @task.add_done_callback
         def callback(f: Future) -> None:
@@ -261,10 +265,8 @@ class ClientWorker(ProcessWorker):
         self.aexit_context.cancel_all()
 
         for p in self.protocols:
-            p.set_close_reason(CloseReason.CLIENT_DISCONNECT)
+            p.set_close_reason(CloseReason.SERVER_CLOSE)
             p.transport.close()
         self.protocols = []
-
-
 
 

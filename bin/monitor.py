@@ -1,46 +1,52 @@
+from typing import Optional
 import asyncio
-import os
-import sys
-
-s = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, s)
+from asyncio import Future, CancelledError
 
 from loguru import logger
 
-from settings import settings
-from manager.monitor import MonitorClient
+from config.settings import client_settings
+from common_bases import Bin
+from manager.monitor import MonitorClient, MonitorConnector
 
 loop = asyncio.get_event_loop()
 
 
-async def connect(factory):
-    try:
-        await loop.create_connection(
-            factory,
-            host=settings.monitor_bind_host,
-            port=settings.monitor_bind_port
+class Monitor(Bin):
+    def __init__(self):
+        super(Monitor, self).__init__()
+        self.client: Optional[MonitorClient] = None
+
+    def start(self):
+        connector = MonitorConnector()
+        connector.connect(
+            MonitorClient,
+            host=client_settings.server_host,
+            port=client_settings.monitor_port
         )
-    except Exception as e:
-        await asyncio.sleep(1)
-        logger.debug('retry')
-        loop.create_task(connect(factory))
 
+        def pre_garbage():
+            f = self.aexit.create_future()
+            connector.set_waiter(f)
 
-async def run():
+            @f.add_done_callback
+            def on_close(r: Future):
+                try:
+                    client = r.result()
+                except CancelledError:
+                    connector.abort()
+                else:
+                    self.client = client
+                    if connector.mode == 'always':
+                        pre_garbage()
+        pre_garbage()
 
-    def factory():
-        f = asyncio.Future()
-
-        @f.add_done_callback
-        def callback(_):
-            loop.create_task(connect(factory))
-
-        return MonitorClient(f)
-    await connect(factory)
+    async def do_handle_stop(self) -> None:
+        if self.client:
+            self.client.transport.close()
+        await asyncio.sleep(0)
 
 
 if __name__ == '__main__':
-    loop.run_until_complete(
-        run()
-    )
-    loop.run_forever()
+    Monitor().run()
+
+

@@ -1,13 +1,15 @@
-from typing import Callable, Optional, Any, Type, Tuple, TYPE_CHECKING, Dict, List
+from typing import Callable, Optional, Type, Tuple, Dict, List, Union
 import pickle
-from asyncio import Protocol, transports
+from asyncio import Protocol, Task, transports, Future, CancelledError, TimerHandle
+from functools import partial, wraps
 from struct import pack, unpack, calcsize
-
 import asyncio
+
+from loguru import logger
 
 from constants import CloseReason
 from revoker import Revoker, TypeRevoker
-from aexit_context import AexitContext, TaskType
+from aexit_context import AexitContext
 
 
 class Parser(object):
@@ -97,4 +99,89 @@ class BaseProtocol(Protocol):
         else:
             self.revoker.call(m, *args, **kwargs)
 
+
+class Connector(object):
+    def __init__(self) -> None:
+        self._loop = asyncio.get_event_loop()
+        self.context: Dict = {}
+        self.task: Union[TimerHandle, Task, Optional] = None
+        self._waiter: Optional[Future] = None
+
+    def set_waiter(self, f: Future) -> None:
+        self._waiter = f
+
+    def connect(self, factory: Callable[..., Protocol], host: str, port: int) -> None:
+        self.context = {
+            'factory': factory,
+            'host': host,
+            'port': port
+        }
+        self.task = self._loop.create_task(
+            self._loop.create_connection(
+                factory,
+                host=host,
+                port=port,
+            )
+        )
+
+        @self.task.add_done_callback
+        def task_callback(f: Future):
+            try:
+                transport, protocol = f.result()
+            except CancelledError:
+                pass
+            except Exception as e:
+                self.client_connection_failed(e)
+            else:
+                self.client_connection_made(protocol)
+                if self._waiter and not self._waiter.done():
+                    self._waiter.set_result(protocol)
+
+    def client_connection_made(self, protocol: Protocol) -> None:
+        pass
+
+    def log_fail(self, reason: Exception) -> None:
+        logger.info(f'{self.__class__.__name__} - Connect Failed - {reason.__class__.__name__}')
+
+    def client_connection_failed(self, reason: Exception) -> None:
+        self.log_fail(reason)
+
+    def abort(self) -> None:
+        if self.task and not self.task.cancelled():
+            self.task.cancel()
+            if self._waiter:
+                self._waiter.cancel()
+
+
+class ReConnector(Connector):
+    delay = 1
+    retries = 0
+    continue_try = 1
+    mode = "until_connect"
+
+    def __init__(self):
+        """mode: until_connect一直重试到成功; always 断开连接也重试"""
+        assert self.mode in ['until_connect', 'always']
+        super(ReConnector, self).__init__()
+
+    def client_connection_made(self, protocol: Protocol) -> None:
+        if self.mode == "until_connect":
+            return
+
+        def __hook_connection_lost(reason: Exception) -> None:
+            connection_lost(reason)
+            self.log_fail(reason)
+            self.retry()
+        connection_lost = protocol.connection_lost
+        wraps(connection_lost)(__hook_connection_lost)
+        protocol.connection_lost = __hook_connection_lost
+
+    def client_connection_failed(self, reason: Exception) -> None:
+        super(ReConnector, self).client_connection_failed(reason)
+        if self.continue_try:
+            self.retry()
+
+    def retry(self) -> None:
+        self.retries += 1
+        self.task = self._loop.call_later(self.delay, partial(self.connect, **self.context))
 

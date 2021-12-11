@@ -48,7 +48,7 @@ def run_worker(worker_cls: Type['ProcessWorker'], *args, **kwargs) -> None:
     worker._loop.close()
 
 
-class ProcessWorker(object):
+class ProcessWorker(Bin):
     def __init__(self, keeper_cls: Type[MessageKeeper],
                  input_channel: Union[Connection, Queue], output_channel: Union[Connection, Queue]) -> None:
         self.closer = Closer(self.handle_stop)

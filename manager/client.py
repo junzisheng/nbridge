@@ -1,10 +1,9 @@
 from typing import List, Optional
-from asyncio import Queue
 
 from loguru import logger
 
 from revoker import Revoker, AuthRevoker, PingPongRevoker
-from protocols import BaseProtocol
+from protocols import BaseProtocol, ReConnector
 from config.settings import client_settings
 
 
@@ -15,6 +14,7 @@ class ClientRevoker(Revoker):
         self.authed = True
         logger.info(f'【{client_settings.name}】Manager Server Session Created')
         self.protocol.on_manager_session_made(
+            self.protocol,
             token,
             proxy_ports,
             proxy_size
@@ -39,5 +39,10 @@ class ClientProtocol(BaseProtocol):
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
         if self.revoker.authed:
             self.on_manager_session_lost(self.close_reason)
+
+
+class ClientConnector(ReConnector):
+    def log_fail(self, reason: Exception) -> None:
+        logger.info(f'Manager Connect Fail - Retry {self.retries} - {reason.__class__.__name__}')
 
 

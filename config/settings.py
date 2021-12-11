@@ -1,15 +1,13 @@
-import os
 import pathlib
 from typing import Dict
 from configparser import ConfigParser
-from functools import cached_property
 
 from pydantic import BaseSettings, BaseModel
 
 from utils import wrapper_prefix_key, map_chain
 
 
-BASE_DIR = str(pathlib.Path().absolute().parent)
+BASE_DIR = str(pathlib.Path(__file__).parent.parent)
 
 
 class Client(BaseModel):
@@ -122,6 +120,7 @@ class ClientSettings(BaseSettings):
     token: str
     server_host: str
     server_port: int
+    monitor_port: int
 
     class Config:
         env_file_encoding = 'utf-8'
