@@ -120,7 +120,6 @@ class ClientSettings(BaseSettings):
     token: str
     server_host: str
     server_port: int
-    monitor_port: int
 
     class Config:
         env_file_encoding = 'utf-8'

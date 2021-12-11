@@ -43,7 +43,6 @@ class Bin(object):
         self.start()
         self._loop.run_forever()
         self._loop.close()
-        logger.info('Closed!')
 
     def start(self) -> None:
         raise NotImplementedError

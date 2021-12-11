@@ -17,8 +17,8 @@ from loguru import logger
 
 from constants import CloseReason
 from revoker import Revoker
-from aexit_context import AexitContext
 from worker import ProcessWorker, Event
+from aexit_context import AexitContext
 from state import State
 from utils import safe_remove
 from messager import Message, ProcessQueueMessageKeeper, ProcessPipeMessageKeeper, MessageKeeper
@@ -54,6 +54,7 @@ class ManagerWorker(ProcessWorker):
         self.proxy_map: Dict[str, List[ProxyServer]] = defaultdict(list)
         self.public_sock_channel = public_sock_channel
         self.proxy_server: Optional[Server] = None
+        self.running_aexit: Dict[str, AexitContext] = defaultdict(AexitContext)
 
     def start(self) -> None:
         def _get_token(client_name: str) -> Optional[str]:
@@ -61,14 +62,14 @@ class ManagerWorker(ProcessWorker):
         
         self.proxy_server = self._loop.run_until_complete(
             self._loop.create_server(
-                partial(ProxyServer, _get_token, self._on_public_state_change),
+                partial(ProxyServer, _get_token, self._on_proxy_state_change),
                 host=server_settings.proxy_bind_host,
                 port=0
             )
         )
         self.message_keeper.put(self.proxy_server.sockets[0].getsockname()[1])
 
-        f = self.aexit_context.create_future()
+        f = self.aexit.create_future()
         # 接收public socket
         self.listen_receive_public_sock()
 
@@ -121,13 +122,15 @@ class ManagerWorker(ProcessWorker):
         os.close(fd)
         public_port = _sock.getsockname()[1]
         public_config = server_settings.public_port_map[public_port]
-        proxy = self.require_proxy(public_config.client.name)
+        client_name = public_config.client.name
+        proxy = self.require_proxy(client_name)
         if not proxy:
             _sock.close()
-            self._send_message_to_change_manager_state_shot(public_config.client.name, True)
+            self._send_message_to_change_manager_state_shot(client_name, True)
+            logger.info('Unexpected no proxy!!')
         else:
             proxy.state.to(State.WORK_PREPARE)
-            task = self.aexit_context.create_task(self._loop.create_connection(
+            task = self.running_aexit[client_name].create_task(self._loop.create_connection(
                 partial(
                     PublicProtocol,
                     (public_config.local_host, public_config.local_port),
@@ -145,7 +148,7 @@ class ManagerWorker(ProcessWorker):
                     if proxy.state.st == State.WORK_PREPARE:
                         proxy.state.to(State.IDLE)
 
-    def _on_public_state_change(self, pre_state: str, state: str, protocol: ProxyServer) -> None:
+    def _on_proxy_state_change(self, pre_state: str, state: str, protocol: ProxyServer) -> None:
         """处理proxy状态变更"""
         client_name = protocol.client_name
         if pre_state == State.WAIT_AUTH and state == State.IDLE:
@@ -157,6 +160,8 @@ class ManagerWorker(ProcessWorker):
 
         if pre_state != State.IDLE and state == State.IDLE:
             self._send_message_to_change_manager_state_shot(protocol.client_name, True)
+        elif pre_state == State.IDLE and state == State.DISCONNECT:
+            self._send_message_to_change_manager_state_shot(protocol.client_name, False)
 
     def current_proxy_state_map(self, client_name: str) -> Dict[str, int]:
         state_map: Dict[str, int] = defaultdict(lambda: 0)
@@ -184,6 +189,7 @@ class ManagerWorker(ProcessWorker):
                 )
                 protocol.transport.close()
             del self.proxy_map[client_name]
+        self.running_aexit[client_name].cancel_all()
 
     def on_message_query_proxy_state(self) -> Tuple[Dict, int]:
         host_map = {}
@@ -200,6 +206,7 @@ class ClientWorker(ProcessWorker):
         super(ClientWorker, self).__init__(keeper_cls, input_channel, output_channel)
         self.protocols: List[ProxyClient] = []
         self.manager_connected = False
+        self.running_exit = AexitContext()
 
     async def _handle_stop(self) -> None:
         self.manager_connected = True
@@ -233,7 +240,7 @@ class ClientWorker(ProcessWorker):
             if delay > 0:
                 await asyncio.sleep(delay)
             return await self._loop.create_connection(factory, host=host, port=port)
-        task = self.aexit_context.create_task(delay_create())
+        task = self.running_exit.create_task(delay_create())
 
         @task.add_done_callback
         def callback(f: Future) -> None:
@@ -262,7 +269,7 @@ class ClientWorker(ProcessWorker):
 
     def on_message_manager_disconnect(self):
         self.manager_connected = False
-        self.aexit_context.cancel_all()
+        self.running_exit.cancel_all()
 
         for p in self.protocols:
             p.set_close_reason(CloseReason.SERVER_CLOSE)

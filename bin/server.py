@@ -11,7 +11,6 @@ from functools import partial, cached_property
 import socket
 from loguru import logger
 
-from state import State
 from common_bases import Bin
 from constants import CloseReason
 from worker import Event, run_worker
@@ -19,6 +18,7 @@ from revoker import Revoker
 from registry import Registry
 from messager import ProcessPipeMessageKeeper, Message, gather_message, broadcast_message
 from manager.server import ManagerServer
+from manager.monitor import MonitorServer
 from manager.manager_worker import WorkerStruct, ManagerWorker
 from public.protocol import start_public_server
 from config.settings import server_settings
@@ -31,6 +31,7 @@ class Server(Bin):
         self.managers: Dict[str, ManagerServer] = {}
         self.manager_server: Optional[Aserver] = None
         self.public_servers: List[socket.socket] = []
+        self.monitor_server: Optional[Aserver] = None
         self.manager_registry = Registry()
 
     def start(self) -> None:
@@ -38,54 +39,6 @@ class Server(Bin):
         self.run_manager()
         self.run_monitor()
         self.run_public_server()
-
-    @cached_property
-    def all_worker(self) -> List[WorkerStruct]:
-        return list(self.workers.values())
-
-    @cached_property
-    def message_keepers(self) -> List[ProcessPipeMessageKeeper]:
-        return [w.message_keeper for w in self.workers.values()]
-
-    @cached_property
-    def proxy_ports(self):
-        return [w.port for w in self.workers.values()]
-
-    def _on_manager_session_made(
-            self, protocol: ManagerServer, token: str, process_notify_waiter: Future
-    ) -> None:
-        client_name = protocol.client_name
-        self.manager_registry.register(client_name, protocol)
-        gather = gather_message(
-            self.message_keepers,
-            Event.CLIENT_CONNECT,
-            token=token,
-            client_name=client_name
-        )
-        futures._chain_future(gather, process_notify_waiter)
-
-    def _on_manager_session_lost(self, protocol: ManagerServer) -> None:
-        client_name = protocol.client_name
-        broadcast_message(self.message_keepers, Event.CLIENT_DISCONNECT, client_name=client_name)
-
-    def _on_public_new_socket(self, client_name: str, sock: socket.socket) -> None:
-        worker = self.choose_balance_worker(client_name)
-        if worker and worker.proxy_idle_map[client_name] > 0:
-            worker.proxy_idle_map[client_name] -= 1
-            try:
-                send_handle(worker.socket_input, sock.fileno(), worker.pid)
-            except Exception as e:
-                logger.exception(e)
-        sock.close()
-
-    def choose_balance_worker(self, client_name: str):
-        """选择一个负载最低的worker"""
-        workers = self.all_worker
-        workers.sort(
-            key=lambda w:  [w.proxy_idle_map[client_name], sum(list(w.proxy_idle_map.values()))],
-            reverse=True
-        )
-        return workers[0]
 
     def run_manager(self) -> None:
         self.manager_server = self._loop.run_until_complete(
@@ -118,40 +71,13 @@ class Server(Bin):
             self.public_servers.append(s)
 
     def run_monitor(self):
-        return
-        self.aexit.create_task(
-            self.loop_monitor()
+        self.monitor_server = self._loop.run_until_complete(
+            self._loop.create_server(
+                partial(MonitorServer, self._on_monitor_session_made),
+                host=server_settings.manager_bind_host,
+                port=server_settings.monitor_bind_port
+            )
         )
-
-    async def loop_monitor(self):
-        while True:
-            from prettytable import PrettyTable
-            await asyncio.sleep(1)
-            Column = ["PID", State.IDLE, State.WORK, State.WAIT_CLIENT_READY, State.WAIT_AUTH, State.DISCONNECT]
-            table = PrettyTable(Column)
-            table_dict = defaultdict(dict)
-            pstr = ["="*50]
-            for host_map, pid in await gather_message(
-                self.message_keepers,
-                Event.QUERY_PROXY_STATE
-            ):
-                for host, state in host_map.items():
-                    default = defaultdict(lambda: 0)
-                    default.update(state)
-                    table_dict[host][pid] = default
-            host_items = list(table_dict.items())
-            host_items.sort(key=lambda x: x[0])
-            for host, p_state in host_items:
-                pstr.append('-'*25 + host + '-'*25)
-                p_items = list(p_state.items())
-                p_items.sort(key=lambda x:x[0])
-                for pid, state in p_items:
-                    row = [pid]
-                    for col in Column[1:]:
-                        row.append(state[col])
-                    table.add_row(row)
-            pstr.append(str(table))
-            print("\n".join(pstr))
 
     def run_worker(self) -> None:
         for idx in range(server_settings.workers):
@@ -187,15 +113,86 @@ class Server(Bin):
             )
             logger.info(f'Proxy Server - 【{server_settings.proxy_bind_host}:{port}】 - {pro.pid}: Started')
 
+    @cached_property
+    def all_worker(self) -> List[WorkerStruct]:
+        return list(self.workers.values())
+
+    @cached_property
+    def message_keepers(self) -> List[ProcessPipeMessageKeeper]:
+        return [w.message_keeper for w in self.workers.values()]
+
+    @cached_property
+    def proxy_ports(self):
+        return [w.port for w in self.workers.values()]
+
+    def get_client_state_map(self) -> dict:
+        host_proxy_state_map = defaultdict(dict)
+        for pid, w in self.workers.items():
+            for client_name, idle_count in w.proxy_idle_map.items():
+                host_proxy_state_map[client_name][pid] = idle_count
+        return host_proxy_state_map
+
+    def _on_monitor_session_made(self, monitor: MonitorServer) -> None:
+        monitor.notify_state(self.get_client_state_map())
+
+    def _on_manager_session_made(
+            self, protocol: ManagerServer, token: str, process_notify_waiter: Future
+    ) -> None:
+        client_name = protocol.client_name
+        self.manager_registry.register(client_name, protocol)
+        gather = gather_message(
+            self.message_keepers,
+            Event.CLIENT_CONNECT,
+            token=token,
+            client_name=client_name
+        )
+        futures._chain_future(gather, process_notify_waiter)
+
+    def _on_manager_session_lost(self, protocol: ManagerServer) -> None:
+        client_name = protocol.client_name
+        broadcast_message(self.message_keepers, Event.CLIENT_DISCONNECT, client_name=client_name)
+        gather = gather_message(
+            self.message_keepers,
+            Event.CLIENT_DISCONNECT,
+            client_name=client_name
+        )
+
+        @gather.add_done_callback
+        def on_clean_done(_):
+            self.manager_registry.unregister(client_name)
+
+    def _on_public_new_socket(self, client_name: str, sock: socket.socket) -> None:
+        worker = self.choose_balance_worker(client_name)
+        if worker and worker.proxy_idle_map[client_name] > 0:
+            worker.proxy_idle_map[client_name] -= 1
+            try:
+                send_handle(worker.socket_input, sock.fileno(), worker.pid)
+            except Exception as e:
+                logger.exception(e)
+        sock.close()
+
+    def choose_balance_worker(self, client_name: str):
+        """选择一个负载最低的worker"""
+        workers = self.all_worker
+        workers.sort(
+            key=lambda w:  [w.proxy_idle_map[client_name], sum(list(w.proxy_idle_map.values()))],
+            reverse=True
+        )
+        return workers[0]
+
     def on_message_proxy_state_change(self, pid: int, client_name: str, is_idle: bool) -> None:
         self.workers[pid].proxy_idle_map[client_name] += 1 if is_idle else -1
+        MonitorServer.notify_all_state(self.get_client_state_map())
 
     async def do_handle_stop(self) -> None:
         waiter_list = []
         # 关闭manager server
         if self.manager_server:
             self.manager_server.close()
-        waiter_list.append(self.manager_server.wait_closed())
+            waiter_list.append(self.manager_server.wait_closed())
+        if self.monitor_server:
+            self.monitor_server.close()
+            waiter_list.append(self.monitor_server.wait_closed())
         # 关闭public
         for s in self.public_servers:
             self._loop.remove_reader(s.fileno())

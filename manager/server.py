@@ -85,5 +85,4 @@ class ManagerServer(BaseProtocol, PingPong):
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
         if self.session_created:
             logger.info(f'Manager 客户端【{self.client_name}】断开连接')
-            self.manager_registry.unregister(self.client_name)
             self.on_session_lost(self)

@@ -4,7 +4,7 @@ from asyncio import Future, Task, CancelledError
 
 from loguru import logger
 
-from protocols import BaseProtocol
+from protocols import BaseProtocol, ReConnector
 from revoker import AuthRevoker, Revoker, PingPongRevoker
 from tunnel import LocalTunnelPair, ProxyClientTunnelPair
 from config.settings import client_settings
@@ -109,4 +109,9 @@ class ProxyClient(BaseProtocol):
         self.tunnel.unregister_tunnel()
         if self.session_created:
             self.on_proxy_session_lost(self)
+
+
+class ProxyConnector(ReConnector):
+    def log_fail(self, reason: Exception) -> None:
+        logger.info(f'Proxy Server Connect Fail - Retry {self.retries} times')
 
