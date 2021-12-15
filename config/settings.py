@@ -5,14 +5,10 @@ from configparser import ConfigParser
 from pydantic import BaseSettings, BaseModel
 
 from utils import wrapper_prefix_key, map_chain
+from common_bases import Public, Client
 
 
 BASE_DIR = str(pathlib.Path(__file__).parent.parent)
-
-
-class Client(BaseModel):
-    name: str
-    token: str
 
 
 class Public(BaseModel):
@@ -83,6 +79,7 @@ class ServerSettings(BaseSettings):
     workers: int
     proxy_pool_size: int
     heart_check_interval: int
+    proxy_wait_timeout: int = 2
 
     manager_bind_host: str
     manager_bind_port: int

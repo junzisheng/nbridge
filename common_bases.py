@@ -1,4 +1,4 @@
-from typing import Callable, Coroutine
+from typing import Callable, Coroutine, Optional
 import signal
 import threading
 from asyncio import Event
@@ -7,6 +7,7 @@ from aexit_context import AexitContext
 
 import uvloop
 from loguru import logger
+from pydantic import BaseModel
 
 from constants import HANDLED_SIGNALS
 
@@ -65,5 +66,65 @@ class Bin(object):
     async def do_handle_stop(self) -> None:
         raise NotImplementedError
 
+
+class Forwarder(object):
+    forwarder: Optional['Forwarder'] = None
+    forwarder_status = -1   # 0 初始化 1 工作 -1 关闭
+    forwarder_buffer = b''
+
+    def reset_forwarder(self) -> None:
+        assert self.forwarder_status == -1
+        self.forwarder_status = 0
+        self.forwarder_buffer = b''
+        self.forwarder = None
+
+    def set_forwarder(self, forwarder: 'Forwarder') -> None:
+        assert self.forwarder_status == 0
+        self.forwarder_status = 1
+        self.forwarder = forwarder
+        if self.forwarder_buffer:
+            self.forward(self.forwarder_buffer)
+            self.forwarder_buffer = b''
+
+    def forward(self, data: bytes) -> None:
+        if self.forwarder_status == 0:
+            self.forwarder_buffer += data
+        elif self.forwarder_status == 1:
+            self.forwarder.write(data)
+
+    def write(self, data: bytes) -> None:
+        raise NotImplementedError
+
+    def close_forwarder(self) -> None:
+        if self.forwarder_status == 1:
+            self.forwarder.forwarder_status = -1
+            self.forwarder.forwarder_buffer = b''
+            self.forwarder.on_forwarder_close()
+            self.forwarder.forwarder = None
+        self.forwarder_buffer = b''
+        self.forwarder_status = -1
+        self.forwarder = None
+
+    def on_forwarder_close(self) -> None:
+        pass
+
+
+class Client(BaseModel):
+    name: str
+    token: str
+    epoch: int = 0
+
+    def increase_epoch(self) -> int:
+        self.epoch += 1
+        return self.epoch
+
+
+class Public(BaseModel):
+    client: Client
+    type: str
+    name: str
+    local_host: str
+    local_port: int
+    bind_port: int = 0
 
 

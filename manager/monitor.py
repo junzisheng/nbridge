@@ -42,19 +42,21 @@ class MonitorRevoker(Revoker):
 class MonitorServer(BaseProtocol):
     protocols_list: List['MonitorServer'] = []
 
-    def __init__(self, on_session_made: callable):
+    def __init__(self, on_session_made: callable, on_session_lost):
         super(MonitorServer, self).__init__()
         self.on_session_made = on_session_made
+        self.on_session_lost = on_session_lost
 
     def on_connection_made(self) -> None:
         self.protocols_list.append(self)
         self.on_session_made(self)
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
+        self.on_session_lost(self)
         self.protocols_list.remove(self)
 
     def notify_state(self, state: dict) -> None:
-        self.rpc_call(MonitorRevoker.call_notify_state, state)
+        self.remote_call(MonitorRevoker.call_notify_state, state)
 
     @classmethod
     def notify_all_state(cls, state: dict) -> None:

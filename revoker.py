@@ -17,14 +17,10 @@ class Revoker(object):
 
     def call(self, m: str, *args, **kwargs) -> None:
         try:
-            getattr(self, 'call_' + m)(*args, **kwargs)
+            getattr(self, m)(*args, **kwargs)
         except Exception as e:
             logger.exception(e)
             self.protocol.transport.close()
-
-    def call_multi(self, call_list: List[Tuple[callable, tuple, dict]]) -> None:
-        for c, a, k in call_list:
-            self.call(c, *a, **k)
 
     @staticmethod
     def call_log(msg: str) -> None:
@@ -60,7 +56,7 @@ class AuthRevoker(Revoker):
         self.protocol.connection_lost = __hook_connection_lost
 
     def call(self, m: str, *args, **kwargs) -> Any:
-        if not self.authed and m != 'auth':
+        if not self.authed and m != 'call_auth':
             self.protocol.transport.close()
         else:
             super().call(m, *args, **kwargs)
@@ -72,28 +68,29 @@ class AuthRevoker(Revoker):
         self._auth_fail()
         self.protocol.transport.close()
 
-    def call_auth(self, token: bytes, host_name: str) -> None:
+    def call_auth(self, token: bytes, client_name: str, *args, **kwargs) -> None:
+        from protocols import BaseProtocol
         if self.authed:
             return
         self.timeout_task.cancel()
-        _token = self.get_token(host_name)
+        _token = self.get_token(client_name)
         if not _token or _token != token:
             self._auth_fail()
+            self.protocol.remote_call(
+                BaseProtocol.rpc_auth_fail
+            )
             self.protocol.transport.close()
             return
         self.authed = True
-        self._auth_success(host_name)
-
-    def call_auth_success(self) -> None:
-        pass
-
-    def call_auth_fail(self, reason) -> None:
-        pass
+        self._auth_success(client_name, *args, **kwargs)
+        # self.protocol.remote_call(
+        #     BaseProtocol.rpc_auth_success
+        # )
 
 
 class PingPongRevoker(Revoker):
     def call_ping(self) -> None:
-        self.protocol.rpc_call(
+        self.protocol.remote_call(
             self.call_pong
         )
 
@@ -106,15 +103,16 @@ class PingPong(object):
     ping_interval = 3
 
     def ping(self):
+        from protocols import BaseProtocol
         if not self.last_pong:
-            self.rpc_call(
-                Revoker.call_set_close_reason,
+            self.remote_call(
+                BaseProtocol.rpc_set_close_reason,
                 CloseReason.PING_TIMEOUT,
             )
             self.transport.close()
             return
         self.last_pong = False
-        self.rpc_call(
+        self.remote_call(
             PingPongRevoker.call_ping,
         )
         self.aexit_context.call_later(

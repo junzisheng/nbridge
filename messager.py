@@ -10,6 +10,24 @@ from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
 
+class Event(object):
+    MANAGER_SESSION_MADE = "MANAGER_SESSION_MADE"
+    MANAGER_SESSION_LOST = "MANAGER_SESSION_LOST"
+    PROXY_APPLY = "PROXY_APPLY"
+    PROXY_LOST = "PROXY_LOST"
+
+    CLIENT_DISCONNECT = "CLIENT_DISCONNECT"
+    PROXY_CREATE = 'PROXY_CREATE'
+    PROXY_CONNECTED = "PROXY_CONNECTED"
+    PROXY_DISCONNECT = "PROXY_DISCONNECT"
+    PROXY_STATE_CHANGE = "PROXY_STATE_CHANGE"
+    PUBLIC_CREATE = "PUBLIC_CREATE"
+    MANAGER_DISCONNECT = "MANAGER_DISCONNECT"
+    QUERY_PROXY_STATE = "QUERY_PROXY_STATE"
+    SERVER_CLOSE = "SERVER_CLOSE"
+    LISTEN_LOOP_STOP = "LISTEN_LOOP_STOP"
+
+
 class MessageType:
     NORMAL = "NORMAL"
     WAITER = "WAITER"
@@ -168,7 +186,6 @@ class MessageKeeper(object):
         raise NotImplementedError
 
     def should_stop(self, message: list) -> bool:
-        from worker import Event
         stop = message[0] == MessageType.NORMAL and message[1] == Event.SERVER_CLOSE
         # 这里需要通知主进程来关闭主进程的循环监听
         if stop:

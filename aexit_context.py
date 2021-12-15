@@ -2,7 +2,9 @@ from typing import Union, List
 from asyncio import Task, TimerHandle, Future
 import asyncio
 
-TaskType = Union[Task, TimerHandle, Future]
+from utils import safe_remove
+
+TaskType = Union[Task, TimerHandle, Future, 'AexitContext']
 
 
 class TimerHandlerWrapper(object):
@@ -23,6 +25,16 @@ class AexitContext(object):
         self._set: List[TaskType] = []
         self._loop = asyncio.get_event_loop()
 
+    def add_callback_when_cancel_all(self, cancel: callable) -> None:
+        f = self.create_future()
+
+        @f.add_done_callback
+        def _(_):
+            cancel()
+
+    def mount(self, aexit: 'AexitContext') -> None:
+        self.add_callback_when_cancel_all(aexit.cancel_all)
+
     def get_set(self) -> List[TaskType]:
         return self._set
 
@@ -32,10 +44,16 @@ class AexitContext(object):
                 task.cancel()
         self._set.clear()
 
+    def monitor_future(self, f: Future) -> None:
+        self._set.append(f)
+        f.add_done_callback(lambda _: safe_remove(self._set, f))
+
+    cancel = cancel_all
+
     def call_later(self, delay, callback, *args) -> TimerHandlerWrapper:
 
         def callback_wrapper(*_args):
-            self.safe_remove(timer)
+            safe_remove(self._set, timer)
             return callback(*_args)
         timer = self._loop.call_later(delay, callback_wrapper, *args)
         self._set.append(timer)
@@ -44,21 +62,16 @@ class AexitContext(object):
     def create_task(self, coro, *, name=None) -> Task:
         task = self._loop.create_task(coro, name=name)
         self._set.append(task)
-        task.add_done_callback(lambda _: self.safe_remove(task))
+        task.add_done_callback(lambda _: safe_remove(self._set, task))
         return task
 
     def create_future(self) -> Future:
         f = Future()
         f.add_done_callback(
-            lambda _: self.safe_remove(f)
+            lambda _: safe_remove(self._set, f)
         )
         self._set.append(f)
         return f
 
-    def safe_remove(self, f):
-        try:
-            self._set.remove(f)
-        except:
-            pass
 
 

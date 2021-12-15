@@ -76,52 +76,87 @@ class BaseProtocol(Protocol):
     def data_received(self, data: bytes) -> None:
         self.parser.dumps(data, self.on_message)
 
-    def rpc_call(self, m: callable, *args, **kwargs) -> None:
+    def remote_call(self, m: callable, *args, **kwargs) -> None:
         if not self.transport.is_closing():
-            self.transport.write(self.parser.loads(m.__name__[5:], *args, **kwargs))
+            self.transport.write(self.parser.loads(m.__name__, *args, **kwargs))
 
-    def rpc_multi_call(self, call_list: List[Tuple[callable, tuple, dict]]) -> None:
-        from revoker import Revoker
+    def remote_multi_call(self, call_list: List[Tuple[callable, tuple, dict]]) -> None:
         _call_list = []
         for c, a, k in call_list:
-            _call_list.append((c.__name__[5:], a, k))
-        self.rpc_call(
-            Revoker.call_multi,
+            _call_list.append((c.__name__, a, k))
+        self.remote_call(
+            BaseProtocol.rpc_multi,
             _call_list
         )
+        
+    def close(self, reason: int) -> None:
+        self.remote_call(
+            BaseProtocol.rpc_set_close_reason,
+            reason
+        )
+        self.transport.close()
+
+    def call(self, m: str, *args, **kwargs) -> None:
+        try:
+            getattr(self, m)(*args, **kwargs)
+        except Exception as e:
+            logger.exception(e)
+            self.transport.close()
 
     def on_message(self, data: bytes) -> None:
         try:
             pdata = pickle.loads(data)
-            m, args, kwargs = pdata['m'], pdata['args'], pdata['kwargs']
+            m, args, kwargs = pdata['m'], pdata['args'], pdata['kwargs']  # type: str, tuple, dict
         except:
             self.transport.close()
         else:
-            self.revoker.call(m, *args, **kwargs)
+            if m.startswith('call_'):
+                self.revoker.call(m, *args, **kwargs)
+            elif m.startswith('rpc_'):
+                self.call(m, *args, **kwargs)
+            else:
+                raise RuntimeError(f'Unknown rpc method:{m}')
+
+    def rpc_multi(self, call_list: List[Tuple[str, tuple, dict]]) -> None:
+        for c, a, k in call_list:
+            if c.startswith('call_'):
+                self.revoker.call(c, *a, **k)
+            elif c.startswith('rpc_'):
+                self.call(c, *a, **k)
+            else:
+                raise RuntimeError(f'Unknown rpc method:{c}')
+
+    def rpc_auth_fail(self, *args, **kwargs) -> None:
+        self.close(CloseReason.AUTH_FAIL)
+
+    def rpc_auth_success(self, *args, **kwargs) -> None:
+        pass
+
+    def rpc_set_close_reason(self, reason: int) -> None:
+        assert self.close_reason == CloseReason.UN_EXPECTED
+        self.close_reason = reason
+
+    @staticmethod
+    def rpc_log(_log: str) -> None:
+        logger.info(_log)
 
 
 class Connector(object):
-    def __init__(self) -> None:
+    def __init__(self, factory: Callable[..., Protocol], host: str, port: int) -> None:
         self._loop = asyncio.get_event_loop()
         self.context: Dict = {}
         self.task: Union[TimerHandle, Task, Optional] = None
         self._waiter: Optional[Future] = None
+        self.factory = factory
+        self.host = host
+        self.port = port
 
     def set_waiter(self, f: Future) -> None:
         self._waiter = f
 
-    def connect(self, factory: Callable[..., Protocol], host: str, port: int) -> None:
-        self.context = {
-            'factory': factory,
-            'host': host,
-            'port': port
-        }
+    def connect(self, ) -> Task:
         self.task = self._loop.create_task(
-            self._loop.create_connection(
-                factory,
-                host=host,
-                port=port,
-            )
+            self._loop.create_connection(self.factory, host=self.host, port=self.port)
         )
 
         @self.task.add_done_callback
@@ -136,6 +171,8 @@ class Connector(object):
                 self.client_connection_made(protocol)
                 if self._waiter and not self._waiter.done():
                     self._waiter.set_result(protocol)
+
+        return self.task
 
     def client_connection_made(self, protocol: Protocol) -> None:
         pass
@@ -159,10 +196,10 @@ class ReConnector(Connector):
     continue_try = 1
     mode = "until_connect"
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         """mode: until_connect一直重试到成功; always 断开连接也重试"""
         assert self.mode in ['until_connect', 'always']
-        super(ReConnector, self).__init__()
+        super(ReConnector, self).__init__(*args, **kwargs)
 
     def client_connection_made(self, protocol: Protocol) -> None:
         if self.mode == "until_connect":
@@ -178,10 +215,14 @@ class ReConnector(Connector):
 
     def client_connection_failed(self, reason: Exception) -> None:
         super(ReConnector, self).client_connection_failed(reason)
-        if self.continue_try:
-            self.retry()
+        self.retry()
 
     def retry(self) -> None:
-        self.retries += 1
-        self.task = self._loop.call_later(self.delay, partial(self.connect, **self.context))
+        if self.continue_try:
+            self.retries += 1
+            self.task = self._loop.call_later(self.delay, partial(self.connect, **self.context))
+
+    def abort(self) -> None:
+        self.continue_try = False
+        super(ReConnector, self).abort()
 

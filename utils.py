@@ -1,5 +1,8 @@
 from typing import Iterator, Any, Dict, Union, List, Tuple
-from itertools import chain
+import asyncio
+from asyncio import constants
+import socket
+import errno
 
 
 def ignore(*args, **kwargs):
@@ -40,4 +43,41 @@ def wrapper_prefix_key(prefix: str, target: dict) -> dict:
     return r
 
 
+def sock_connect(host: str, port: int) -> socket.socket:
+    pass
 
+
+def start_server(server_endpoint: Tuple[str, int], post: callable, backlog=100) -> socket.socket:
+    loop = asyncio.get_event_loop()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    server.bind(server_endpoint)
+    server.setblocking(False)
+    server.listen(backlog)
+
+    def _accept_connection():
+        for i in range(backlog):
+            try:
+                conn, addr = server.accept()
+                post(conn)
+            except (BlockingIOError, InterruptedError, ConnectionAbortedError):
+                return None
+            except OSError as exc:
+                if exc.errno in (errno.EMFILE, errno.ENFILE,
+                                 errno.ENOBUFS, errno.ENOMEM):
+                    loop.remove_reader(server.fileno())
+                    loop.call_later(
+                        constants.ACCEPT_RETRY_DELAY,
+                        _start_serving
+                    )
+
+    def _start_serving():
+        loop.add_reader(server.fileno(), _accept_connection)
+
+    _start_serving()
+    return server
+
+
+def socket_fromfd(fd: int) -> socket.socket:
+    return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)

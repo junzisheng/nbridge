@@ -50,7 +50,7 @@ async def test_auth(event_loop):
     class ClientProtocol(BaseProtocol):
         def connection_made(self, transport: transports.Transport) -> None:
             super().connection_made(transport)
-            self.rpc_call(AuthRevoker.call_auth, 'bb')
+            self.remote_call(AuthRevoker.call_auth, 'bb')
 
         def connection_lost(self, exc: Optional[Exception]) -> None:
             close_event.set()
