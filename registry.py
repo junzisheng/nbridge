@@ -1,3 +1,5 @@
+from typing import Optional
+
 from protocols import BaseProtocol
 
 
@@ -7,6 +9,9 @@ class Registry(object):
 
     def all_registry(self) -> dict:
         return self._registry
+
+    def get(self, key: str) -> Optional[BaseProtocol]:
+        return self._registry.get(key)
 
     def is_registered(self, key: str) -> bool:
         return key in self._registry

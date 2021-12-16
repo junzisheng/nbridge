@@ -1,4 +1,6 @@
 from typing import Tuple, Dict, Optional, List, Type, Union
+import asyncio
+from asyncio import Task
 import signal
 from multiprocessing import Process
 import time
@@ -13,7 +15,7 @@ from loguru import logger
 from constants import HANDLED_SIGNALS
 from common_bases import Bin, Client
 from messager import MessageKeeper
-from utils import ignore
+from utils import ignore, get_running_loop, catch_cor_exception
 from constants import CloseReason, ProxyState
 from aexit_context import AexitContext
 from messager import Message, ProcessPipeMessageKeeper
@@ -69,6 +71,7 @@ class ProcessWorker(Bin):
         self.message_keeper.stop()
         self.message_keeper.close()
         await self._handle_stop()
+        await asyncio.sleep(0)
 
     async def _handle_stop(self) -> None:
         raise NotImplementedError
@@ -82,17 +85,26 @@ class ProcessWorker(Bin):
             signal.signal(sig, ignore)
 
 
+_id = 0
 class ProxyStateWrapper(ProxyServer):
     state = ProxyState.INIT
-    last_idle: Optional[int] = None
+    last_idle: Optional[float] = None
+
+    def __init__(self, *args, **kwargs):
+        global _id
+        _id += 1
+        super(ProxyStateWrapper, self).__init__(*args, **kwargs)
+        self._id = _id
 
     def state_to_idle(self) -> None:
         assert self.state in [ProxyState.INIT, ProxyState.BUSY]
-        self.last_idle = int(time.time())
+        print(self._id, 'to_idle')
+        self.last_idle = get_running_loop().time()
         self.state = ProxyState.IDLE
 
     def state_to_busy(self):
         assert self.state == ProxyState.IDLE
+        print(self._id, 'to_busy')
         self.state = ProxyState.BUSY
 
     def is_idle(self) -> bool:
@@ -103,10 +115,38 @@ class ProxyStateWrapper(ProxyServer):
 
 
 class ProxyPool(Queue):
-    def __init__(self):
+    def __init__(self, loop, async_create_proxy_invoke, min_size: int):
         super(ProxyPool, self).__init__()
+        self.loop = loop
         self.busy: List[ProxyStateWrapper] = []
+        self.async_create_proxy_invoke = async_create_proxy_invoke
         self._close_done_waiter: Optional[Future] = None
+        self.min_size = min_size
+        self.recycle_task: Optional[Task] = None
+
+    def start_recycle_task(self):
+        from config.settings import server_settings
+        loop = self.loop
+
+        @catch_cor_exception
+        async def recycle():
+            while True:
+                await asyncio.sleep(1)
+                recycle_list = []
+                now = loop.time()
+                recycle_num = self.qsize() - self.min_size
+                if recycle_num > 0:
+                    for proxy in self._queue:  # type: ProxyStateWrapper
+                        if now - proxy.last_idle > server_settings.proxy_pool_recycle:
+                            if len(recycle_list) != recycle_num:
+                                recycle_list.append(proxy)
+                            else:
+                                break
+                    while recycle_list:
+                        proxy = recycle_list.pop()
+                        proxy.close(CloseReason.PROXY_RECYCLE)
+
+        self.recycle_task = loop.create_task(recycle())
 
     def closing(self) -> bool:
         return self._close_done_waiter is not None
@@ -120,9 +160,14 @@ class ProxyPool(Queue):
         proxy.state_to_busy()
         self.busy.append(proxy)
         self.log()
+        self.may_create_more()
         return proxy
 
     def _put(self, proxy: ProxyStateWrapper) -> None:
+        try:
+            assert proxy not in self._queue
+        except:
+            print('----')
         self._check_closing()
         if proxy.is_busy():
             self.remove(proxy)
@@ -133,12 +178,12 @@ class ProxyPool(Queue):
     def remove(self, proxy: ProxyStateWrapper) -> None:
         if proxy.is_idle():
             self._queue.remove(proxy)
+            self.may_create_more()
         else:
             self.busy.remove(proxy)
             if self.closing():
                 self._check_all_closed()
         self.log()
-        self.may_apply_more()
 
     def close_all(self, reason: int) -> Future:
         while not self.empty():
@@ -159,27 +204,33 @@ class ProxyPool(Queue):
         self._check_all_closed()
         return self._close_done_waiter
 
-    def may_apply_more(self) -> None:
+    def may_create_more(self) -> None:
         if not self.closing():
-            pass
+            if self.qsize() < self.min_size:
+                self.async_create_proxy_invoke(1)
 
     def _check_all_closed(self) -> None:
         if not self.busy:
             self._close_done_waiter.set_result(None)
 
     def log(self) -> None:
+        # pass
         print(f'[{os.getpid()}] - idle: {self.qsize()} - busy: {len(self.busy)}')
 
 
 class ClientStruct(object):
-    def __init__(self, name: str, token: str, public_sockets: List[socket.socket]) -> None:
+    def __init__(self, name: str, token: str, public_sockets: List[socket.socket], proxy_pool: ProxyPool) -> None:
         self.name = name
         self.token = token
         self.session: bool = False
         self.public_read: bool = False
         self.public_sockets = public_sockets
-        self.proxy_pool = ProxyPool()
+        self.proxy_pool = proxy_pool
         self.aexit = AexitContext()
+
+        # @self.aexit.add_callback_when_cancel_all
+        # def _():
+        #     self.close_session()
 
     @property
     def closed(self) -> bool:

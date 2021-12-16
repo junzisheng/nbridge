@@ -164,6 +164,11 @@ class Server(Bin):
     def message_keepers(self) -> List[ProcessPipeMessageKeeper]:
         return [w.message_keeper for w in self.workers.values()]
 
+    def on_message_proxy_create(self, client_name: str, port, num=1) -> None:
+        manager = self.manager_registry.get(client_name)  # type: ManagerServer
+        if manager and manager.session_status == 1:
+            manager.create_proxy(port, num)
+
     async def do_handle_stop(self) -> None:
         workers = self.workers.values()
         for worker in workers:

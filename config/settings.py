@@ -11,15 +11,6 @@ from common_bases import Public, Client
 BASE_DIR = str(pathlib.Path(__file__).parent.parent)
 
 
-class Public(BaseModel):
-    client: Client
-    type: str
-    name: str
-    local_host: str
-    local_port: int
-    bind_port: int = 0
-
-
 def _load_server_config(_) -> dict:
     config = ConfigParser()
     config.read(pathlib.Path().joinpath(BASE_DIR, 'config', 'server.ini'))
@@ -65,21 +56,12 @@ def _load_server_config(_) -> dict:
     )
 
 
-def _load_client_config(_) -> dict:
-    config = ConfigParser()
-    config.read(pathlib.Path().joinpath(BASE_DIR, 'config', 'client.ini'))
-    config = dict(config)
-    del config['DEFAULT']
-
-    meta_config = config.pop('meta')
-    return dict(meta_config)
-
-
 class ServerSettings(BaseSettings):
     workers: int
     proxy_pool_size: int
     heart_check_interval: int
-    proxy_wait_timeout: int = 2
+    proxy_wait_timeout: int
+    proxy_pool_recycle: int
 
     manager_bind_host: str
     manager_bind_port: int
@@ -111,30 +93,12 @@ class ServerSettings(BaseSettings):
             )
 
 
-class ClientSettings(BaseSettings):
+class ClientSettings(BaseModel):
     workers: int
     name: str
     token: str
     server_host: str
     server_port: int
 
-    class Config:
-        env_file_encoding = 'utf-8'
-
-        @classmethod
-        def customise_sources(
-                cls,
-                init_settings,
-                env_settings,
-                file_secret_settings,
-        ):
-            return (
-                env_settings,
-                _load_client_config,
-                file_secret_settings,
-                init_settings,
-            )
-
 
 server_settings = ServerSettings()
-client_settings = ClientSettings()

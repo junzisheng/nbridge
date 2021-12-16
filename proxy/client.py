@@ -6,8 +6,8 @@ from loguru import logger
 
 from protocols import BaseProtocol, ReConnector
 from common_bases import Forwarder
-from revoker import AuthRevoker, Revoker, PingPongRevoker, PingPong
-from config.settings import client_settings
+from invoker import AuthInvoker, PingPongInvoker, PingPong
+from config.settings import ClientSettings
 
 
 class LocalProtocol(BaseProtocol, Forwarder):
@@ -28,10 +28,11 @@ TypeProxyClientCallback = Callable[['ProxyClient'], None]
 
 
 class ProxyClient(BaseProtocol, Forwarder, PingPong):
-    revoker_bases = (PingPongRevoker, )
+    invoker_bases = (PingPongInvoker, )
 
     def __init__(
         self,
+        client_settings: ClientSettings,
         on_proxy_session_made: TypeProxyClientCallback,
         on_lost: TypeProxyClientCallback,
         epoch: int
@@ -40,6 +41,7 @@ class ProxyClient(BaseProtocol, Forwarder, PingPong):
         self.epoch = epoch
         self.on_proxy_session_made = on_proxy_session_made
         self.on_lost = on_lost
+        self.client_settings = client_settings
         self._init()
 
     def _init(self) -> None:
@@ -48,43 +50,43 @@ class ProxyClient(BaseProtocol, Forwarder, PingPong):
 
     def on_connection_made(self) -> None:
         self.remote_call(
-            AuthRevoker.call_auth,
-            client_settings.token,
-            client_settings.name,
+            AuthInvoker.call_auth,
+            self.client_settings.token,
+            self.client_settings.name,
             self.epoch
         )
-        self.on_proxy_session_made(self)
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
         self.on_lost(self)
 
     def rpc_local_pair(self, host: str, port: int) -> None:
         assert self._local_task is None
-        task = self.aexit_context.create_task(
+        self._local_task = self.aexit_context.create_task(
             self._loop.create_connection(
                 LocalProtocol,
                 host=host,
                 port=port
             )
         )
-
         self.reset_forwarder()
 
-        @task.add_done_callback
+        @self._local_task.add_done_callback
         def _(f: Future) -> None:
             try:
                 _, local_protocol = f.result()  # type: Any, LocalProtocol
+                print(id(self), self.forwarder_status)
                 local_protocol.reset_forwarder()
                 self.set_forwarder(local_protocol)
                 local_protocol.set_forwarder(self)
             except CancelledError:
                 pass
-            except Exception as e:
+            except RuntimeError as e:
                 logger.exception(e)
+                self.trigger_client_fin()
+            except Exception as e:
                 self.trigger_client_fin()
             finally:
                 self._local_task = None
-        self._local_task = task
 
     def write(self, data: bytes) -> None:
         assert self.forwarder_status == 1

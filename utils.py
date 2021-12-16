@@ -1,8 +1,11 @@
-from typing import Iterator, Any, Dict, Union, List, Tuple
+from typing import Iterator, Any, Dict, Union, List, Tuple, Callable, Awaitable
+import sys
 import asyncio
 from asyncio import constants
 import socket
 import errno
+
+from loguru import logger
 
 
 def ignore(*args, **kwargs):
@@ -43,10 +46,6 @@ def wrapper_prefix_key(prefix: str, target: dict) -> dict:
     return r
 
 
-def sock_connect(host: str, port: int) -> socket.socket:
-    pass
-
-
 def start_server(server_endpoint: Tuple[str, int], post: callable, backlog=100) -> socket.socket:
     loop = asyncio.get_event_loop()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -81,3 +80,19 @@ def start_server(server_endpoint: Tuple[str, int], post: callable, backlog=100) 
 
 def socket_fromfd(fd: int) -> socket.socket:
     return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+
+
+def get_running_loop() -> asyncio.AbstractEventLoop:
+    from async_timeout import _get_running_loop
+    return _get_running_loop()
+
+
+def catch_cor_exception(cor: Callable[..., Awaitable[Any]]):
+    """被引用的task如果报错没有被del，也就不会被exception_handler捕捉，这里主动捕捉并上报"""
+    async def wrapper(*args, **kwargs):
+        try:
+            return await cor(*args, **kwargs)
+        except Exception as e:
+            loop = asyncio.get_running_loop()
+            loop.call_exception_handler({'message': 'unexpected error', 'exception': e})
+    return wrapper

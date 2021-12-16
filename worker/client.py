@@ -11,23 +11,22 @@ from aexit_context import AexitContext
 from utils import safe_remove
 from messager import Message, Event, MessageKeeper
 from proxy.client import ProxyClient
-from config.settings import client_settings
+from config.settings import ClientSettings
 
 
 class ClientWorker(ProcessWorker):
     def __init__(
-        self, keeper_cls: Type[MessageKeeper], input_channel: Union[Connection, Queue],
+        self, client_settings: ClientSettings, keeper_cls: Type[MessageKeeper], input_channel: Union[Connection, Queue],
         output_channel: Union[Connection, Queue]
     ) -> None:
         super(ClientWorker, self).__init__(keeper_cls, input_channel, output_channel)
+        self.client_settings = client_settings
         self.proxy_list: List[ProxyClient] = []
-        # self.manager_connected = False
-        # self.running_exit = AexitContext()
 
     async def _handle_stop(self) -> None:
         pass
 
-    def on_message_proxy_apply(self, epoch: int, port: int) -> None:
+    def on_message_proxy_create(self, epoch: int, port: int) -> None:
         def on_session_made(proxy: ProxyClient) -> None:
             self.proxy_list.append(proxy)
 
@@ -42,11 +41,12 @@ class ClientWorker(ProcessWorker):
         connector = Connector(
             partial(
                 ProxyClient,
+                self.client_settings,
                 on_session_made,
                 on_lost,
                 epoch
             ),
-            host=client_settings.server_host,
+            host=self.client_settings.server_host,
             port=port,
         )
         connector.connect()

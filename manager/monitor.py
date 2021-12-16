@@ -7,13 +7,13 @@ from loguru import logger
 from prettytable import PrettyTable
 
 from protocols import BaseProtocol, ReConnector
-from revoker import Revoker
+from invoker import Invoker
 from state import State
 
 Column = ["PID", State.IDLE, State.WORK, State.WAIT_CLIENT_READY, State.WAIT_AUTH, State.DISCONNECT]
 
 
-class MonitorRevoker(Revoker):
+class MonitorInvoker(Invoker):
 
     @staticmethod
     def call_notify_state(state: str) -> None:
@@ -56,7 +56,7 @@ class MonitorServer(BaseProtocol):
         self.protocols_list.remove(self)
 
     def notify_state(self, state: dict) -> None:
-        self.remote_call(MonitorRevoker.call_notify_state, state)
+        self.remote_call(MonitorInvoker.call_notify_state, state)
 
     @classmethod
     def notify_all_state(cls, state: dict) -> None:
@@ -65,7 +65,7 @@ class MonitorServer(BaseProtocol):
 
 
 class MonitorClient(BaseProtocol):
-    revoker_bases = (MonitorRevoker,)
+    invoker_bases = (MonitorInvoker,)
 
     def on_connection_made(self) -> None:
         logger.info('Monitor Connect Success')

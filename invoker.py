@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from protocols import BaseProtocol
 
 
-class Revoker(object):
+class Invoker(object):
     def __init__(self, protocol: 'BaseProtocol'):
         self.protocol = protocol
 
@@ -33,7 +33,7 @@ class Revoker(object):
         pass
 
 
-class AuthRevoker(Revoker):
+class AuthInvoker(Invoker):
     TOKEN = ""
     authed = False
 
@@ -76,9 +76,15 @@ class AuthRevoker(Revoker):
         _token = self.get_token(client_name)
         if not _token or _token != token:
             self._auth_fail()
-            self.protocol.remote_call(
-                BaseProtocol.rpc_auth_fail
+            self.protocol.remote_multi_call(
+                [
+                    (BaseProtocol.rpc_set_close_reason, (CloseReason.AUTH_FAIL,), {}),
+                    (BaseProtocol.rpc_auth_fail, (), {})
+                ]
             )
+            # self.protocol.remote_call(
+            #     BaseProtocol.rpc_auth_fail
+            # )
             self.protocol.transport.close()
             return
         self.authed = True
@@ -88,7 +94,7 @@ class AuthRevoker(Revoker):
         # )
 
 
-class PingPongRevoker(Revoker):
+class PingPongInvoker(Invoker):
     def call_ping(self) -> None:
         self.protocol.remote_call(
             self.call_pong
@@ -113,7 +119,7 @@ class PingPong(object):
             return
         self.last_pong = False
         self.remote_call(
-            PingPongRevoker.call_ping,
+            PingPongInvoker.call_ping,
         )
         self.aexit_context.call_later(
             self.ping_interval,
@@ -124,5 +130,5 @@ class PingPong(object):
         self.last_pong = True
 
 
-TypeRevoker = TypeVar('Revoker', Revoker, AuthRevoker)
+TypeInvoker = TypeVar('Invoker', Invoker, AuthInvoker)
 

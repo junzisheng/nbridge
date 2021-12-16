@@ -20,5 +20,6 @@ class CloseReason(object):
     PING_TIMEOUT = 3
     SERVER_CLOSE = 5
     CLIENT_NAME_UNKNOWN = 6
-    CLINET_EPOCH_EXPIRED = 7
+    CLIENT_EPOCH_EXPIRED = 7
+    PROXY_RECYCLE = 8
 

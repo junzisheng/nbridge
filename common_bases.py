@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from constants import HANDLED_SIGNALS
+from utils import catch_cor_exception
 
 
 class Closer(object):
@@ -39,6 +40,7 @@ class Bin(object):
         self._stop = False
 
     def run(self) -> None:
+        self._loop.set_exception_handler(self.exception_handler)
         self.closer.run()
         self.install_signal_handlers()
         self.start()
@@ -53,6 +55,10 @@ class Bin(object):
             return
         for sig in HANDLED_SIGNALS:
             signal.signal(sig, self._handle_exit)
+
+    def exception_handler(self, loop, context) -> None:
+        # self.closer.call_close()
+        logger.error(f'{context["exception"]}')
 
     def _handle_exit(self, *args, **kwargs) -> None:
         self._stop = True
@@ -90,17 +96,20 @@ class Forwarder(object):
         if self.forwarder_status == 0:
             self.forwarder_buffer += data
         elif self.forwarder_status == 1:
-            self.forwarder.write(data)
+            # RuntimeError('unable to perform operation on <TCPTransport closed=True reading=False 0x131615770>
+            # ; the handler is closed')
+            if not self.forwarder.transport.is_closing():
+                self.forwarder.write(data)
 
     def write(self, data: bytes) -> None:
         raise NotImplementedError
 
     def close_forwarder(self) -> None:
-        if self.forwarder_status == 1:
+        if self.forwarder:
             self.forwarder.forwarder_status = -1
             self.forwarder.forwarder_buffer = b''
-            self.forwarder.on_forwarder_close()
             self.forwarder.forwarder = None
+            self.forwarder.on_forwarder_close()
         self.forwarder_buffer = b''
         self.forwarder_status = -1
         self.forwarder = None

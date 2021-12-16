@@ -8,7 +8,7 @@ import asyncio
 from loguru import logger
 
 from constants import CloseReason
-from revoker import Revoker, TypeRevoker
+from invoker import Invoker, TypeInvoker
 from aexit_context import AexitContext
 
 
@@ -39,13 +39,13 @@ class Parser(object):
 
 
 class BaseProtocol(Protocol):
-    revoker_bases: Tuple[Type[Revoker]] = (Revoker,)
+    invoker_bases: Tuple[Type[Invoker]] = (Invoker,)
 
     def __init__(self):
         self._loop = asyncio.get_event_loop()
         self.parser = Parser()
         self.transport: Optional[transports.Transport] = None
-        self.revoker: TypeRevoker = self.create_revoker()
+        self.invoker: TypeInvoker = self.create_invoker()
         self.aexit_context = AexitContext()
         self.close_reason: int = CloseReason.UN_EXPECTED
 
@@ -58,7 +58,7 @@ class BaseProtocol(Protocol):
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.on_connection_lost(exc)
-        self.revoker.on_protocol_close()
+        self.invoker.on_protocol_close()
         self.aexit_context.cancel_all()
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
@@ -67,10 +67,10 @@ class BaseProtocol(Protocol):
     def set_close_reason(self, reason: int) -> None:
         self.close_reason = reason
 
-    def create_revoker(self) -> TypeRevoker:
-        return type('Revoker', self.revoker_bases, self.get_revoker_attrs())(self)
+    def create_invoker(self) -> TypeInvoker:
+        return type('Invoker', self.invoker_bases, self.get_invoker_attrs())(self)
 
-    def get_revoker_attrs(self) -> Dict:
+    def get_invoker_attrs(self) -> Dict:
         return {}
 
     def data_received(self, data: bytes) -> None:
@@ -111,7 +111,7 @@ class BaseProtocol(Protocol):
             self.transport.close()
         else:
             if m.startswith('call_'):
-                self.revoker.call(m, *args, **kwargs)
+                self.invoker.call(m, *args, **kwargs)
             elif m.startswith('rpc_'):
                 self.call(m, *args, **kwargs)
             else:
@@ -120,7 +120,7 @@ class BaseProtocol(Protocol):
     def rpc_multi(self, call_list: List[Tuple[str, tuple, dict]]) -> None:
         for c, a, k in call_list:
             if c.startswith('call_'):
-                self.revoker.call(c, *a, **k)
+                self.invoker.call(c, *a, **k)
             elif c.startswith('rpc_'):
                 self.call(c, *a, **k)
             else:

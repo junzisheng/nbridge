@@ -4,6 +4,8 @@ import asyncio
 from asyncio import Future
 from multiprocessing import Process, Pipe
 from functools import partial, cached_property
+from optparse import OptionValueError, OptionParser
+import os
 
 from loguru import logger
 
@@ -12,9 +14,51 @@ from messager import Event, Message, ProcessPipeMessageKeeper, broadcast_message
 from constants import CloseReason
 from manager.client import ClientProtocol, ClientConnector
 from worker.bases import run_worker, ClientWorkerStruct
-from config.settings import client_settings
 from worker.client import ClientWorker
-from utils import loop_travel
+
+from config.settings import ClientSettings
+
+
+def get_client_settings() -> ClientSettings:
+    parser = OptionParser()
+    parser.add_option('-w', '--works', dest="workers", default=os.cpu_count() * 2 + 1,
+                      help="set client workers;default os (cpu_count * 2 + 1)", type=int)
+    parser.add_option('-n', '--name', dest="name", help="client name;required", type=str)
+    parser.add_option('-t', '--token', dest="token", help="client token;required", type=str)
+    parser.add_option('-s', '--sh', dest="host", help="server net bridge host", type=str)
+    parser.add_option('-p', '--port', dest="port", help="server net bridge post", type=int, default=9999)
+
+    (options, args) = parser.parse_args()
+    workers = options.workers
+    name = options.name
+    token = options.token
+    host = options.host
+    port = options.port
+
+    if workers < 1:
+        raise OptionValueError('workers must gather than 1!')
+    elif not name:
+        raise OptionValueError('name opt is required!')
+    elif not token:
+        raise OptionValueError('token opt is required!')
+    elif not host:
+        raise OptionValueError('host opt is required!')
+    # os.environ['workers'] = str(workers)
+    # os.environ['name'] = name
+    # os.environ['token'] = token
+    # os.environ['server_host'] = host
+    # os.environ['server_port'] = str(port)
+
+    return ClientSettings(
+        workers=workers,
+        name=name,
+        token=token,
+        server_host=host,
+        server_port=port
+    )
+
+
+client_settings = get_client_settings()
 
 
 class Client(Bin):
@@ -39,7 +83,7 @@ class Client(Bin):
             message_keeper = ProcessPipeMessageKeeper(self, parent_input_channel, child_output_channel)
             pro = Process(
                 target=run_worker,
-                args=(ClientWorker, ProcessPipeMessageKeeper, child_input_channel, parent_output_channel)
+                args=(ClientWorker, client_settings, ProcessPipeMessageKeeper, child_input_channel, parent_output_channel)
             )
             pro.daemon = True
             pro.start()
@@ -88,6 +132,7 @@ class Client(Bin):
         connector = ClientConnector(
             partial(
                 ClientProtocol,
+                client_settings=client_settings,
                 on_manager_session_made=on_manager_session_made,
                 on_manager_session_lost=on_manager_session_lost,
                 apply_new_proxy=self.apply_new_proxy
@@ -111,7 +156,7 @@ class Client(Bin):
         worker.proxy_state[port] += 1
         worker.put(
             Message(
-                Event.PROXY_APPLY,
+                Event.PROXY_CREATE,
                 epoch,
                 port
             )

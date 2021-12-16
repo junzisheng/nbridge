@@ -4,14 +4,14 @@ from socket import socket
 from protocols import BaseProtocol
 from constants import CloseReason
 from common_bases import Forwarder
-from revoker import AuthRevoker, PingPongRevoker, PingPong
+from invoker import AuthInvoker, PingPongInvoker, PingPong
 from config.settings import server_settings
 if TYPE_CHECKING:
     from public.protocol import PublicProtocol
     from worker.bases import ClientStruct
 
 
-class ServerRevoker(AuthRevoker):
+class ServerInvoker(AuthInvoker):
     TIMEOUT = 3
 
     def get_token(self, client_name: str) -> Optional[str]:
@@ -23,7 +23,7 @@ ProxyServerCallbackType = Callable[['ProxyServer'], None]
 
 
 class ProxyServer(BaseProtocol, PingPong, Forwarder):
-    revoker_bases = (ServerRevoker, PingPongRevoker)
+    invoker_bases = (ServerInvoker, PingPongInvoker)
     ping_interval = server_settings.heart_check_interval
 
     client_name = ''
@@ -63,7 +63,7 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
                     (ProxyClient.rpc_log, (f'Server epoch: {client.epoch} - Client epoch: {epoch}; Epoch Error', ), {})
                 ]
             )
-            self.close(CloseReason.CLINET_EPOCH_EXPIRED)
+            self.close(CloseReason.CLIENT_EPOCH_EXPIRED)
         else:
             self.remote_call(
                 ProxyClient.rpc_auth_success
@@ -79,6 +79,7 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
             self.close_forwarder()
 
     def set_forwarder(self, forwarder: 'PublicProtocol') -> None:
+        print('set_forward', self._id)
         super(ProxyServer, self).set_forwarder(forwarder)
         from proxy.client import ProxyClient
         sock: socket = forwarder.transport.get_extra_info('socket')
@@ -101,9 +102,11 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
     def may_both_fin(self) -> None:
         if self.client_fin and self.server_fin:
             self._init()
+            print('may both fin', self._id)
             self.on_task_done(self)
 
     def trigger_server_fin(self) -> None:
+        print('trigger ---', self._id)
         assert not self.server_fin
         self.close_forwarder()
         self.server_fin = True
@@ -117,6 +120,7 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
         self.forward(data)
 
     def rpc_client_fin(self) -> None:
+        print(self._id, 'rpc_client_fin')
         assert not self.client_fin
         self.client_fin = True
         if not self.server_fin:

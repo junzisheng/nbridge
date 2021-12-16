@@ -8,6 +8,7 @@ from asyncio import Future
 from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
+from utils import catch_cor_exception
 
 
 class Event(object):
@@ -15,17 +16,8 @@ class Event(object):
     MANAGER_SESSION_LOST = "MANAGER_SESSION_LOST"
     PROXY_APPLY = "PROXY_APPLY"
     PROXY_LOST = "PROXY_LOST"
-
-    CLIENT_DISCONNECT = "CLIENT_DISCONNECT"
-    PROXY_CREATE = 'PROXY_CREATE'
-    PROXY_CONNECTED = "PROXY_CONNECTED"
-    PROXY_DISCONNECT = "PROXY_DISCONNECT"
-    PROXY_STATE_CHANGE = "PROXY_STATE_CHANGE"
-    PUBLIC_CREATE = "PUBLIC_CREATE"
-    MANAGER_DISCONNECT = "MANAGER_DISCONNECT"
-    QUERY_PROXY_STATE = "QUERY_PROXY_STATE"
+    PROXY_CREATE = "PROXY_CREATE"
     SERVER_CLOSE = "SERVER_CLOSE"
-    LISTEN_LOOP_STOP = "LISTEN_LOOP_STOP"
 
 
 class MessageType:

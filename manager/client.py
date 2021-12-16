@@ -2,31 +2,32 @@ from typing import List, Optional, Callable
 
 from loguru import logger
 
-from revoker import Revoker, AuthRevoker, PingPongRevoker, PingPong
+from invoker import AuthInvoker, PingPongInvoker, PingPong
 from protocols import BaseProtocol, ReConnector
-from config.settings import client_settings
+from config.settings import ClientSettings
 
 
 class ClientProtocol(BaseProtocol, PingPong):
-    revoker_bases = (PingPongRevoker, )
+    invoker_bases = (PingPongInvoker, )
     server_worker_info: Optional[List[str]] = None
     session_made = False
     epoch = None
 
     def __init__(
-            self, *, on_manager_session_made: callable, on_manager_session_lost: callable,
+            self, *, client_settings: ClientSettings , on_manager_session_made: callable, on_manager_session_lost: callable,
             apply_new_proxy: Callable[[int, int], None],
     ) -> None:
         super().__init__()
         self.on_manager_session_made = on_manager_session_made
         self.on_manager_session_lost = on_manager_session_lost
         self.apply_new_proxy = apply_new_proxy
+        self.client_settings = client_settings
 
     def on_connection_made(self) -> None:
         self.remote_call(
-            AuthRevoker.call_auth,
-            client_settings.token,
-            client_settings.name,
+            AuthInvoker.call_auth,
+            self.client_settings.token,
+            self.client_settings.name,
         )
         self.on_manager_session_made(self)
         
@@ -39,14 +40,12 @@ class ClientProtocol(BaseProtocol, PingPong):
         self.server_worker_info = workers
         self.epoch = epoch
 
-    def rpc_make_proxy(self, port: int, size: int) -> None:
-        print(port, size, self.epoch)
+    def rpc_create_proxy(self, port: int, size: int) -> None:
         for i in range(size):
             self.apply_new_proxy(self.epoch, port)
 
     def on_connection_lost(self, exc: Optional[Exception]) -> None:
-        if self.session_made:
-            self.on_manager_session_lost(self.close_reason)
+        self.on_manager_session_lost(self.close_reason)
 
 
 class ClientConnector(ReConnector):

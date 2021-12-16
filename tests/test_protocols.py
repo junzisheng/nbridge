@@ -4,7 +4,7 @@ from asyncio import transports
 
 import pytest
 
-from protocols import BaseProtocol, AuthRevoker
+from protocols import BaseProtocol, AuthInvoker
 
 
 @pytest.mark.skip
@@ -41,7 +41,7 @@ async def test_base(event_loop):
 async def test_auth(event_loop):
     port = 82
     await event_loop.create_server(
-        type('AuthProtocol', (BaseProtocol,), {'revoker_class': AuthRevoker}),
+        type('AuthProtocol', (BaseProtocol,), {'invoker_class': AuthInvoker}),
         host='0.0.0.0',
         port=port
     )
@@ -50,7 +50,7 @@ async def test_auth(event_loop):
     class ClientProtocol(BaseProtocol):
         def connection_made(self, transport: transports.Transport) -> None:
             super().connection_made(transport)
-            self.remote_call(AuthRevoker.call_auth, 'bb')
+            self.remote_call(AuthInvoker.call_auth, 'bb')
 
         def connection_lost(self, exc: Optional[Exception]) -> None:
             close_event.set()
