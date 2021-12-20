@@ -4,7 +4,7 @@ import asyncio
 import pytest
 import uvloop
 
-uvloop.install()
+# uvloop.install()
 
 
 os.environ['pytest'] = 'True'

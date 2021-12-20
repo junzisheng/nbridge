@@ -1,4 +1,5 @@
 from typing import Callable, Coroutine, Optional
+import os
 import signal
 import threading
 from asyncio import Event
@@ -10,7 +11,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from constants import HANDLED_SIGNALS
-from utils import catch_cor_exception
+from utils import setup_logger
 
 
 class Closer(object):
@@ -18,12 +19,13 @@ class Closer(object):
         self._close_event = Event()
         self.handle_stop = handle_stop
 
-    def run(self):
+    def run(self) -> None:
         asyncio.get_event_loop().create_task(
             self.while_stop()
         )
 
     def call_close(self) -> None:
+        assert not self._close_event.is_set()
         self._close_event.set()
 
     async def while_stop(self) -> None:
@@ -40,6 +42,8 @@ class Bin(object):
         self._stop = False
 
     def run(self) -> None:
+        from config.settings import BASE_DIR
+        setup_logger(os.path.join(BASE_DIR, 'log'), 'log')
         self._loop.set_exception_handler(self.exception_handler)
         self.closer.run()
         self.install_signal_handlers()
@@ -51,18 +55,18 @@ class Bin(object):
         raise NotImplementedError
 
     def install_signal_handlers(self) -> None:
+        def _handle_exit(*args, **kwargs) -> None:
+            self._stop = True
+            self.closer.call_close()
+
         if threading.current_thread() is not threading.main_thread():
             return
         for sig in HANDLED_SIGNALS:
-            signal.signal(sig, self._handle_exit)
+            signal.signal(sig, _handle_exit)
 
     def exception_handler(self, loop, context) -> None:
         # self.closer.call_close()
-        logger.error(f'{context["exception"]}')
-
-    def _handle_exit(self, *args, **kwargs) -> None:
-        self._stop = True
-        self.closer.call_close()
+        logger.exception(f'{context["exception"]}')
 
     async def _handle_close(self) -> None:
         self.aexit.cancel_all()
@@ -98,8 +102,8 @@ class Forwarder(object):
         elif self.forwarder_status == 1:
             # RuntimeError('unable to perform operation on <TCPTransport closed=True reading=False 0x131615770>
             # ; the handler is closed')
-            if not self.forwarder.transport.is_closing():
-                self.forwarder.write(data)
+            # if not self.forwarder.transport.is_closing():
+            self.forwarder.write(data)
 
     def write(self, data: bytes) -> None:
         raise NotImplementedError

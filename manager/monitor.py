@@ -8,7 +8,6 @@ from prettytable import PrettyTable
 
 from protocols import BaseProtocol, ReConnector
 from invoker import Invoker
-from state import State
 
 Column = ["PID", State.IDLE, State.WORK, State.WAIT_CLIENT_READY, State.WAIT_AUTH, State.DISCONNECT]
 

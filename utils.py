@@ -1,4 +1,6 @@
-from typing import Iterator, Any, Dict, Union, List, Tuple, Callable, Awaitable
+from typing import Iterator, Any, Union, Tuple, Callable, Awaitable
+import os
+import logging
 import sys
 import asyncio
 from asyncio import constants
@@ -8,14 +10,10 @@ import errno
 from loguru import logger
 
 
-def ignore(*args, **kwargs):
-    pass
+def ignore(*args, **kwargs): pass
 
 
-def loop_travel(iterator: Iterator) -> Iterator:
-    while True:
-        for i in iterator:
-            yield i
+async def async_ignore(*args, **kwargs): pass
 
 
 def safe_remove(lst: Union[list, dict], value: Any) -> bool:
@@ -82,11 +80,6 @@ def socket_fromfd(fd: int) -> socket.socket:
     return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
 
 
-def get_running_loop() -> asyncio.AbstractEventLoop:
-    from async_timeout import _get_running_loop
-    return _get_running_loop()
-
-
 def catch_cor_exception(cor: Callable[..., Awaitable[Any]]):
     """被引用的task如果报错没有被del，也就不会被exception_handler捕捉，这里主动捕捉并上报"""
     async def wrapper(*args, **kwargs):
@@ -96,3 +89,30 @@ def catch_cor_exception(cor: Callable[..., Awaitable[Any]]):
             loop = asyncio.get_running_loop()
             loop.call_exception_handler({'message': 'unexpected error', 'exception': e})
     return wrapper
+
+
+def setup_logger(log_file_dir, log_file_name: str):
+    logger.remove(handler_id=None)
+    logger.add(
+        sys.stdout, level=logging.INFO, format="{time:%Y-%m-%d %H:%M:%S} | {level} | {message}, {process}",
+        filter=lambda record: record['level'].name == 'INFO'
+    )
+    logger.add(
+        sys.stdout, level=logging.DEBUG, format="{time:%Y-%m-%d %H:%M:%S} | {level} | {message}, {process}",
+        filter=lambda record: record['level'].name == 'DEBUG'
+    )
+    logger.add(
+        sys.stdout, level=logging.ERROR, format="{time:%Y-%m-%d %H:%M:%S} | {level} | {message}, {process}",
+        filter=lambda record: record['level'].name == 'ERROR'
+    )
+    logger.add(
+        os.path.join(log_file_dir, f'{log_file_name}.info'), level=logging.INFO,
+        format="{time:%Y-%m-%d %H:%M:%S} | {level} | {message}",
+        filter=lambda record: record['level'].name == 'INFO', rotation="00:00"
+    )
+    logger.add(
+        os.path.join(log_file_dir, f'{log_file_name}.error'),
+        level=logging.ERROR, format="{time:%Y-%m-%d %H:%M:%S} | {level} | {message}", rotation="00:00"
+    )
+
+

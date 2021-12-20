@@ -29,3 +29,5 @@ class Registry(object):
         except KeyError:
             return False
 
+import socket
+socket.AF_UNIX

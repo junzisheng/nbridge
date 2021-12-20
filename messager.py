@@ -1,4 +1,4 @@
-from typing import Any, Union, Optional, Tuple, Dict, List
+from typing import Any, Union, Optional, Dict, List
 import uuid
 from multiprocessing import Queue as Mqueue
 from multiprocessing.connection import Connection
@@ -8,7 +8,6 @@ from asyncio import Future
 from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
-from utils import catch_cor_exception
 
 
 class Event(object):

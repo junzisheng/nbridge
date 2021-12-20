@@ -24,11 +24,13 @@ def _load_server_config(_) -> dict:
 
     client_config, public_config = {}, {}
 
+    # client config
     for section_key, section_val in config.items():
         if section_key.startswith('client:'):
             client_name = section_key[7:]
             section_val.update({'name': client_name})
             client_config[client_name] = Client(**section_val)
+    # public config
     for section_key, section_val in config.items():
         if section_key.startswith('public:'):
             public_name = section_key[7:]
@@ -42,6 +44,8 @@ def _load_server_config(_) -> dict:
             public_config[public_name] = Public(**section_val)
     public_port_map = {}
     for pubic in public_config.values():
+        if pubic.bind_port in public_port_map:
+            raise RuntimeError(f'{pubic.bind_port} repeat')
         public_port_map[pubic.bind_port] = pubic
     return map_chain(
         dict(meta_config),
@@ -66,9 +70,6 @@ class ServerSettings(BaseSettings):
     manager_bind_host: str
     manager_bind_port: int
 
-    proxy_bind_host: str
-
-    monitor_bind_host: str
     monitor_bind_port: int
 
     client_map: Dict[str, Client]

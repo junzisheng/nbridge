@@ -44,16 +44,9 @@ class AuthInvoker(Invoker):
         )
         self._auth_success = getattr(protocol, 'on_auth_success', ignore)
         self._auth_fail = getattr(protocol, 'on_auth_fail', ignore)
-        self.hook()
 
-    def hook(self):
-        _connection_lost = self.protocol.connection_lost
-
-        def __hook_connection_lost(exc: Optional[Exception]) -> None:
-            self.timeout_task.cancel()
-            _connection_lost(exc)
-        wraps(_connection_lost)(__hook_connection_lost)
-        self.protocol.connection_lost = __hook_connection_lost
+    def on_protocol_close(self) -> None:
+        self.timeout_task.cancel()
 
     def call(self, m: str, *args, **kwargs) -> Any:
         if not self.authed and m != 'call_auth':

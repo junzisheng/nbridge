@@ -139,7 +139,7 @@ class ManagerWorker(ProcessWorker):
                 partial(
                     ProxyStateWrapper, self.client_info, on_proxy_session_made, on_proxy_session_lost, on_task_done
                 ),
-                host=server_settings.proxy_bind_host,
+                host=server_settings.manager_bind_host,
                 port=0
             )
         )

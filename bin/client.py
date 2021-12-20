@@ -141,13 +141,7 @@ class Client(Bin):
             port=client_settings.server_port,
         )
         connector.connect()
-        f = self.aexit.create_future()
-
-        @f.add_done_callback
-        def on_close(r: Future) -> None:
-            connector.abort()
-
-        connector.set_waiter(f)
+        self.aexit.add_callback_when_cancel_all(connector.abort)
 
     def apply_new_proxy(self, epoch: int, port: int) -> None:
         all_workers = list(self.workers.values())

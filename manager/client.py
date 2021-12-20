@@ -1,4 +1,5 @@
 from typing import List, Optional, Callable
+from asyncio import Future, Task
 
 from loguru import logger
 
@@ -51,5 +52,19 @@ class ClientProtocol(BaseProtocol, PingPong):
 class ClientConnector(ReConnector):
     def log_fail(self, reason: Exception) -> None:
         logger.info(f'Manager Connect Fail - Retry {self.retries} - {reason.__class__}')
+
+    def waiter_factory(self):
+        waiter = Future()
+
+        @waiter.add_done_callback
+        def _(f: Future):
+            if f.exception():
+                logger.info(f'Manager Connect Fail - Retry {self.retries} - {f.exception().__class__}')
+        return waiter
+
+    def client_connection_failed(self, reason: Exception) -> None:
+        logger.info(f'Manager Connect Fail - Retry {self.retries} - {reason.__class__}')
+        super(ClientConnector, self).client_connection_failed(reason)
+
 
 

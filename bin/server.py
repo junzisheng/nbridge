@@ -18,7 +18,7 @@ from worker.server import ManagerWorker
 from registry import Registry
 from messager import ProcessPipeMessageKeeper, Message, gather_message, broadcast_message
 from manager.server import ManagerServer
-from manager.monitor import MonitorServer
+# from manager.monitor import MonitorServer
 from config.settings import server_settings
 
 
@@ -36,7 +36,7 @@ class Server(Bin):
         self.run_manager()
         self.run_public_server()
         self.run_worker()
-        self.run_monitor()
+        # self.run_monitor()
 
     def run_manager(self) -> None:
         def on_manager_session_made(manager: ManagerServer) -> Future:

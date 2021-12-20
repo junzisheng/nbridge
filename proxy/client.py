@@ -1,5 +1,6 @@
 from typing import Optional, Any, Callable
 import asyncio
+from functools import partial
 from asyncio import Future, Task, CancelledError
 
 from loguru import logger
@@ -11,6 +12,13 @@ from config.settings import ClientSettings
 
 
 class LocalProtocol(BaseProtocol, Forwarder):
+    def __init__(self, on_connection_made: callable):
+        super(LocalProtocol, self).__init__()
+        self._on_connection_made = on_connection_made
+
+    def on_connection_made(self) -> None:
+        self._on_connection_made(self)
+
     def data_received(self, data: bytes) -> None:
         self.forward(data)
 
@@ -61,23 +69,26 @@ class ProxyClient(BaseProtocol, Forwarder, PingPong):
 
     def rpc_local_pair(self, host: str, port: int) -> None:
         assert self._local_task is None
+        self.reset_forwarder()
+
+        def on_connection_made(local: LocalProtocol) -> None:
+            print(id(self), self.forwarder_status)
+            local.reset_forwarder()
+            self.set_forwarder(local)
+            local.set_forwarder(self)
+
         self._local_task = self.aexit_context.create_task(
             self._loop.create_connection(
-                LocalProtocol,
+                partial(LocalProtocol, on_connection_made),
                 host=host,
                 port=port
             )
         )
-        self.reset_forwarder()
 
         @self._local_task.add_done_callback
         def _(f: Future) -> None:
             try:
-                _, local_protocol = f.result()  # type: Any, LocalProtocol
-                print(id(self), self.forwarder_status)
-                local_protocol.reset_forwarder()
-                self.set_forwarder(local_protocol)
-                local_protocol.set_forwarder(self)
+                f.result()
             except CancelledError:
                 pass
             except RuntimeError as e:

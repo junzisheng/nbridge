@@ -1,9 +1,8 @@
-from typing import Tuple, Dict, Optional, List, Type, Union
+from typing import Dict, Optional, List, Type, Union
 import asyncio
 from asyncio import Task
 import signal
 from multiprocessing import Process
-import time
 import os
 from collections import defaultdict
 from multiprocessing.connection import Connection
@@ -15,7 +14,7 @@ from loguru import logger
 from constants import HANDLED_SIGNALS
 from common_bases import Bin, Client
 from messager import MessageKeeper
-from utils import ignore, get_running_loop, catch_cor_exception
+from utils import ignore, catch_cor_exception
 from constants import CloseReason, ProxyState
 from aexit_context import AexitContext
 from messager import Message, ProcessPipeMessageKeeper
@@ -99,7 +98,7 @@ class ProxyStateWrapper(ProxyServer):
     def state_to_idle(self) -> None:
         assert self.state in [ProxyState.INIT, ProxyState.BUSY]
         print(self._id, 'to_idle')
-        self.last_idle = get_running_loop().time()
+        self.last_idle = self._loop.time()
         self.state = ProxyState.IDLE
 
     def state_to_busy(self):
@@ -227,10 +226,6 @@ class ClientStruct(object):
         self.public_sockets = public_sockets
         self.proxy_pool = proxy_pool
         self.aexit = AexitContext()
-
-        # @self.aexit.add_callback_when_cancel_all
-        # def _():
-        #     self.close_session()
 
     @property
     def closed(self) -> bool:

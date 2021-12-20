@@ -12,6 +12,9 @@ class TimerHandlerWrapper(object):
         self.__timer = timer
         self.__context = context
 
+    def get_timer(self) -> TimerHandle:
+        return self.__timer
+
     def cancel(self) -> None:
         self.__context.get_set().remove(self.__timer)
         self.__timer.cancel()
@@ -24,13 +27,10 @@ class AexitContext(object):
     def __init__(self) -> None:
         self._set: List[TaskType] = []
         self._loop = asyncio.get_event_loop()
+        self._callback_when_cancel_all: List[callable] = []
 
     def add_callback_when_cancel_all(self, cancel: callable) -> None:
-        f = self.create_future()
-
-        @f.add_done_callback
-        def _(_):
-            cancel()
+        self._callback_when_cancel_all.append(cancel)
 
     def mount(self, aexit: 'AexitContext') -> None:
         self.add_callback_when_cancel_all(aexit.cancel_all)
@@ -38,11 +38,19 @@ class AexitContext(object):
     def get_set(self) -> List[TaskType]:
         return self._set
 
+    def get_callbacks(self) -> List[callable]:
+        return self._callback_when_cancel_all
+
+    def clear_callbacks(self) -> None:
+        self._callback_when_cancel_all.clear()
+
     def cancel_all(self):
         for task in self._set:
             if not task.cancelled():
                 task.cancel()
         self._set.clear()
+        for callback in self._callback_when_cancel_all:
+            callback()
 
     def monitor_future(self, f: Future) -> None:
         self._set.append(f)

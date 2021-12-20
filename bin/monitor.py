@@ -4,7 +4,6 @@ from asyncio import Future, CancelledError
 
 from loguru import logger
 
-from config.settings import client_settings
 from common_bases import Bin
 from manager.monitor import MonitorClient, MonitorConnector
 
@@ -17,28 +16,13 @@ class Monitor(Bin):
         self.client: Optional[MonitorClient] = None
 
     def start(self):
-        connector = MonitorConnector()
-        connector.connect(
+        connector = MonitorConnector(
             MonitorClient,
             host=client_settings.server_host,
             port=client_settings.monitor_port
         )
-
-        def pre_garbage():
-            f = self.aexit.create_future()
-            connector.set_waiter(f)
-
-            @f.add_done_callback
-            def on_close(r: Future):
-                try:
-                    client = r.result()
-                except CancelledError:
-                    connector.abort()
-                else:
-                    self.client = client
-                    if connector.mode == 'always':
-                        pre_garbage()
-        pre_garbage()
+        connector.connect()
+        self.aexit.add_callback_when_cancel_all(connector.abort)
 
     async def do_handle_stop(self) -> None:
         if self.client:
