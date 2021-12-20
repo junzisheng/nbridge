@@ -154,7 +154,7 @@ class Server(Bin):
                 message_keeper=message_keeper,
                 proxy_port=proxy_port
             )
-            logger.info(f'Proxy Server - 【{server_settings.proxy_bind_host}:{proxy_port}】 - {pro.pid}: Started')
+            logger.info(f'Proxy Server - 【{server_settings.manager_bind_host}:{proxy_port}】 - {pro.pid}: Started')
 
     @cached_property
     def all_worker(self) -> List[ServerWorkerStruct]:
