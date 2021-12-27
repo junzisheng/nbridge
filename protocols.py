@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Type, Tuple, Dict, List, Union
+from typing import Callable, Optional, Type, Tuple, Dict, List, Union, Any
 import pickle
 from asyncio import Protocol, Task, transports, Future, CancelledError, TimerHandle
 from struct import pack, unpack, calcsize
@@ -62,7 +62,7 @@ class BaseProtocol(Protocol):
     def on_connection_lost(self, exc: Optional[Exception]) -> None: pass
 
     def set_close_reason(self, reason: int) -> None:
-        assert self.close_reason == CloseReason.UN_EXPECTED
+        assert self.close_reason == CloseReason.UN_EXPECTED or self.close_reason == reason
         self.close_reason = reason
 
     def create_invoker(self) -> TypeInvoker:
@@ -92,23 +92,27 @@ class BaseProtocol(Protocol):
         )
         
     def close(self, reason: int) -> None:
-        self.remote_call(
-            BaseProtocol.rpc_set_close_reason,
-            reason
-        )
-        self.transport.close()
+        if not self.transport.is_closing():
+            self.set_close_reason(reason)
+            self.remote_call(
+                BaseProtocol.rpc_set_close_reason,
+                reason
+            )
+            self.transport.close()
 
-    def call(self, m: str, *args, **kwargs) -> None:
+    def call(self, m: str, *args, **kwargs) -> Any:
         try:
-            getattr(self, m)(*args, **kwargs)
+            return getattr(self, m)(*args, **kwargs)
         except Exception as e:
             logger.exception(e)
             self.transport.close()
 
     def on_message(self, data: bytes) -> None:
         m, args, kwargs = pickle.loads(data)
+        # invoker
         if m.startswith('call_'):
             self.invoker.call(m, *args, **kwargs)
+        # protocol
         elif m.startswith('rpc_'):
             self.call(m, *args, **kwargs)
         else:
@@ -131,8 +135,7 @@ class BaseProtocol(Protocol):
     def rpc_auth_success(self, *args, **kwargs) -> None: pass
 
     def rpc_set_close_reason(self, reason: int) -> None:
-        assert self.close_reason == CloseReason.UN_EXPECTED
-        self.close_reason = reason
+        self.set_close_reason(reason)
 
     @staticmethod
     def rpc_log(_log: str) -> None:

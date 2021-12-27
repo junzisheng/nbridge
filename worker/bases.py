@@ -7,7 +7,6 @@ import os
 from collections import defaultdict
 from multiprocessing.connection import Connection
 from asyncio import Queue, Future
-import socket
 
 from loguru import logger
 
@@ -17,7 +16,7 @@ from messager import MessageKeeper
 from utils import ignore, catch_cor_exception
 from constants import CloseReason, ProxyState
 from aexit_context import AexitContext
-from messager import Message, ProcessPipeMessageKeeper
+from messager import Message, ProcessPipeMessageKeeper, SocketChannel, Event
 from proxy.server import ProxyServer
 
 
@@ -35,9 +34,10 @@ class WorkerStruct(object):
         
 
 class ServerWorkerStruct(WorkerStruct):
-    def __init__(self, proxy_port: int, *args, **kwargs) -> None:
+    def __init__(self, proxy_port: int, socket_channel: SocketChannel, *args, **kwargs) -> None:
         super(ServerWorkerStruct, self).__init__(*args, **kwargs)
         self.proxy_port = proxy_port
+        self.socket_channel = socket_channel
 
 
 class ClientWorkerStruct(WorkerStruct):
@@ -61,7 +61,9 @@ class ProcessWorker(Bin):
                  input_channel: Union[Connection, Queue], output_channel: Union[Connection, Queue]) -> None:
         super(ProcessWorker, self).__init__()
         self.pid = os.getpid()
-        self.message_keeper = keeper_cls(self, input_channel, output_channel)
+        receiver = self.make_receiver()
+        receiver.setdefault(Event.SERVER_CLOSE, self.closer.call_close)
+        self.message_keeper = keeper_cls(receiver, input_channel, output_channel)
 
     def start(self) -> None:
         pass
@@ -75,35 +77,29 @@ class ProcessWorker(Bin):
     async def _handle_stop(self) -> None:
         raise NotImplementedError
 
-    def on_message_server_close(self) -> None:
-        self.closer.call_close()
-
     def install_signal_handlers(self) -> None:
         """进程不监听信号，接收父进程消息结束进程"""
         for sig in HANDLED_SIGNALS:
             signal.signal(sig, ignore)
 
+    def make_receiver(self) -> Dict:
+        raise NotImplementedError
 
-_id = 0
+
 class ProxyStateWrapper(ProxyServer):
     state = ProxyState.INIT
     last_idle: Optional[float] = None
 
     def __init__(self, *args, **kwargs):
-        global _id
-        _id += 1
         super(ProxyStateWrapper, self).__init__(*args, **kwargs)
-        self._id = _id
 
     def state_to_idle(self) -> None:
         assert self.state in [ProxyState.INIT, ProxyState.BUSY]
-        print(self._id, 'to_idle')
         self.last_idle = self._loop.time()
         self.state = ProxyState.IDLE
 
     def state_to_busy(self):
         assert self.state == ProxyState.IDLE
-        print(self._id, 'to_busy')
         self.state = ProxyState.BUSY
 
     def is_idle(self) -> bool:
@@ -163,10 +159,7 @@ class ProxyPool(Queue):
         return proxy
 
     def _put(self, proxy: ProxyStateWrapper) -> None:
-        try:
-            assert proxy not in self._queue
-        except:
-            print('----')
+        assert proxy not in self._queue
         self._check_closing()
         if proxy.is_busy():
             self.remove(proxy)
@@ -181,12 +174,13 @@ class ProxyPool(Queue):
         else:
             self.busy.remove(proxy)
             if self.closing():
-                self._check_all_closed()
+                self._check_all_busy_closed()
         self.log()
 
     def close_all(self, reason: int) -> Future:
-        while not self.empty():
-            proxy = self.get_nowait()  # type: ProxyStateWrapper
+        self._close_done_waiter = self._loop.create_future()  # type: Future
+
+        for proxy in self._queue:
             proxy.close(reason)
 
         while self._getters:
@@ -194,13 +188,12 @@ class ProxyPool(Queue):
             getter.cancel()
 
         for proxy in self.busy:
-            proxy.transport.close()
-        self._close_done_waiter = self._loop.create_future()  # type: Future
+            proxy.close(reason)
 
         @self._close_done_waiter.add_done_callback
         def _(_):
             self._close_done_waiter = None
-        self._check_all_closed()
+        self._check_all_busy_closed()
         return self._close_done_waiter
 
     def may_create_more(self) -> None:
@@ -208,7 +201,7 @@ class ProxyPool(Queue):
             if self.qsize() < self.min_size:
                 self.async_create_proxy_invoke(1)
 
-    def _check_all_closed(self) -> None:
+    def _check_all_busy_closed(self) -> None:
         if not self.busy:
             self._close_done_waiter.set_result(None)
 
@@ -218,12 +211,11 @@ class ProxyPool(Queue):
 
 
 class ClientStruct(object):
-    def __init__(self, name: str, token: str, public_sockets: List[socket.socket], proxy_pool: ProxyPool) -> None:
+    def __init__(self, name: str, token: str, proxy_pool: ProxyPool) -> None:
         self.name = name
         self.token = token
+        self.epoch = -1
         self.session: bool = False
-        self.public_read: bool = False
-        self.public_sockets = public_sockets
         self.proxy_pool = proxy_pool
         self.aexit = AexitContext()
 
@@ -240,3 +232,11 @@ class ClientStruct(object):
         self.session = False
         self.epoch = -1
         return self.proxy_pool.close_all(CloseReason.MANAGE_CLIENT_LOST)
+
+    def destroy(self) -> Future:
+        f = self.close_session()
+        self.aexit.cancel_all()
+        return f
+
+
+

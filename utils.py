@@ -3,7 +3,7 @@ import os
 import logging
 import sys
 import asyncio
-from asyncio import constants
+from asyncio import constants, transports
 import socket
 import errno
 
@@ -80,6 +80,17 @@ def socket_fromfd(fd: int) -> socket.socket:
     return socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
 
 
+def create_server_sock(addr: Tuple[str, int], backlog=50) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, True)
+    sock.setblocking(False)
+    sock.bind(addr)
+    sock.listen(backlog)
+    sock.set_inheritable(True)
+    return sock
+
+
 def catch_cor_exception(cor: Callable[..., Awaitable[Any]]):
     """被引用的task如果报错没有被del，也就不会被exception_handler捕捉，这里主动捕捉并上报"""
     async def wrapper(*args, **kwargs):
@@ -89,6 +100,11 @@ def catch_cor_exception(cor: Callable[..., Awaitable[Any]]):
             loop = asyncio.get_running_loop()
             loop.call_exception_handler({'message': 'unexpected error', 'exception': e})
     return wrapper
+
+
+def protocol_sockname(transport: transports.Transport) -> Tuple[str, int]:
+    sock: socket.socket = transport.get_extra_info('socket')
+    return sock.getsockname()
 
 
 def setup_logger(log_file_dir, log_file_name: str):

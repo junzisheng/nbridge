@@ -22,4 +22,6 @@ class CloseReason(object):
     CLIENT_NAME_UNKNOWN = 6
     CLIENT_EPOCH_EXPIRED = 7
     PROXY_RECYCLE = 8
+    COMMANDER_REMOVE = 9
+    TCP_CLOSE = 10
 

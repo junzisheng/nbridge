@@ -15,7 +15,7 @@ class ServerInvoker(AuthInvoker):
     TIMEOUT = 3
 
     def get_token(self, client_name: str) -> Optional[str]:
-        client_config = server_settings.client_map.get(client_name)
+        client_config = self.protocol.client_info.get(client_name)
         return client_config.token if client_config else None
 
 
@@ -78,17 +78,15 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
             self.on_session_lost(self)
             self.close_forwarder()
 
-    def set_forwarder(self, forwarder: 'PublicProtocol') -> None:
-        print('set_forward', self._id)
+    def set_forwarder(self, forwarder: 'PublicProtocol', local_host: str, local_port: int) -> None:
         super(ProxyServer, self).set_forwarder(forwarder)
         from proxy.client import ProxyClient
         sock: socket = forwarder.transport.get_extra_info('socket')
         _, port = sock.getsockname()
-        public_config = server_settings.public_port_map[port]
         self.remote_call(
             ProxyClient.rpc_local_pair,
-            public_config.local_host,
-            public_config.local_port
+            local_host,
+            local_port
         )
 
     def write(self, data: bytes) -> None:
@@ -102,11 +100,9 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
     def may_both_fin(self) -> None:
         if self.client_fin and self.server_fin:
             self._init()
-            print('may both fin', self._id)
             self.on_task_done(self)
 
     def trigger_server_fin(self) -> None:
-        print('trigger ---', self._id)
         assert not self.server_fin
         self.close_forwarder()
         self.server_fin = True
@@ -120,7 +116,6 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
         self.forward(data)
 
     def rpc_client_fin(self) -> None:
-        print(self._id, 'rpc_client_fin')
         assert not self.client_fin
         self.client_fin = True
         if not self.server_fin:

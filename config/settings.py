@@ -1,5 +1,5 @@
+from typing import Dict, List
 import pathlib
-from typing import Dict
 from configparser import ConfigParser
 
 from pydantic import BaseSettings, BaseModel
@@ -31,22 +31,24 @@ def _load_server_config(_) -> dict:
             section_val.update({'name': client_name})
             client_config[client_name] = Client(**section_val)
     # public config
+    public_list: List = []
     for section_key, section_val in config.items():
         if section_key.startswith('public:'):
             public_name = section_key[7:]
-            client_name = section_val['client']
-            client = client_config[client_name]
-            section_val = dict(section_val)
-            section_val.update({
-                'name': public_name,
-                'client': client
-            })
-            public_config[public_name] = Public(**section_val)
-    public_port_map = {}
-    for pubic in public_config.values():
-        if pubic.bind_port in public_port_map:
-            raise RuntimeError(f'{pubic.bind_port} repeat')
-        public_port_map[pubic.bind_port] = pubic
+            mapping: str = section_val['mapping']
+            _type = section_val['type']
+            if _type == 'tcp':
+                client_name, local_addr = mapping.split('@')  # type: str, str
+                local_host, local_port = local_addr.split(':')
+                public_list.append(
+                    Public(
+                        type='tcp', name=public_name, bind_port=section_val['bind_port'],
+                        mapping={client_name: (local_host, int(local_port))}
+                    )
+                )
+            else:
+                pass
+
     return map_chain(
         dict(meta_config),
         wrapper_prefix_key('manager_', manager_config),
@@ -54,8 +56,7 @@ def _load_server_config(_) -> dict:
         wrapper_prefix_key('monitor_', monitor_config),
         {
             'client_map': client_config,
-            'public_map': public_config,
-            'public_port_map': public_port_map
+            'public_list': public_list
         }
     )
 
@@ -73,8 +74,7 @@ class ServerSettings(BaseSettings):
     monitor_bind_port: int
 
     client_map: Dict[str, Client]
-    public_map: Dict[str, Public]
-    public_port_map: Dict[int, Public]
+    public_list: List[Public]
 
     class Config:
         env_file_encoding = 'utf-8'

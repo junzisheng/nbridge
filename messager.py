@@ -2,6 +2,7 @@ from typing import Any, Union, Optional, Dict, List
 import uuid
 from multiprocessing import Queue as Mqueue
 from multiprocessing.connection import Connection
+from multiprocessing.reduction import recv_handle, send_handle
 from asyncio import Queue, Task
 import asyncio
 from asyncio import Future
@@ -17,6 +18,11 @@ class Event(object):
     PROXY_LOST = "PROXY_LOST"
     PROXY_CREATE = "PROXY_CREATE"
     SERVER_CLOSE = "SERVER_CLOSE"
+    # commander
+    CLIENT_ADD = "CLIENT_ADD"
+    CLIENT_REMOVE = "CLIENT_REMOVE"
+    TCP_ADD = "TCP_ADD"
+    TCP_REMOVE = "TCP_REMOVE"
 
 
 class MessageType:
@@ -154,8 +160,11 @@ class MessageKeeper(object):
 
     def callback(self, event: str, *args, **kwargs) -> Union[Any, Future]:
         try:
-            callback = getattr(self.receiver, self.callback_prefix + event.lower())
-            return callback(*args, **kwargs)
+            if isinstance(self.receiver, dict):
+                return self.receiver[event](*args, **kwargs)
+            else:
+                callback = getattr(self.receiver, self.callback_prefix + event.lower())
+                return callback(*args, **kwargs)
         except Exception as e:
             logger.exception(e)
             raise
@@ -192,11 +201,16 @@ class AsyncMessageKeeper(MessageKeeper):
             if self.should_stop(message):
                 break
 
-    def get(self) -> Any:
-        return self.output_channel.get()
+    async def get(self) -> Any:
+        return await self.output_channel.get()
 
     def put(self, item: Any) -> None:
         self.input_channel.put_nowait(item)
+
+    async def request(self, message: Message) -> Any:
+        assert self.listen_task is None
+        self.send(message)
+        return await self.get()
 
 
 class ProcessQueueMessageKeeper(MessageKeeper):
@@ -258,3 +272,24 @@ class ProcessPipeMessageKeeper(MessageKeeper):
     def close(self):
         self.output_channel.close()
         self.input_channel.close()
+
+
+class SocketChannel:
+    def __init__(self, channel: Connection, pid: int) -> None:
+        self.pid = pid
+        self.channel = channel
+
+    def send(self, fileno: int) -> None:
+        send_handle(self.channel, fileno, self.pid)
+
+    def receive(self) -> int:
+        return recv_handle(self.channel)
+
+    def close(self) -> None:
+        self.channel.close()
+
+
+def broadcast_socket(channels: List[SocketChannel], fileno: int) -> None:
+    for channel in channels:
+        channel.send(fileno)
+

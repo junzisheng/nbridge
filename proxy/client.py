@@ -72,7 +72,6 @@ class ProxyClient(BaseProtocol, Forwarder, PingPong):
         self.reset_forwarder()
 
         def on_connection_made(local: LocalProtocol) -> None:
-            print(id(self), self.forwarder_status)
             local.reset_forwarder()
             self.set_forwarder(local)
             local.set_forwarder(self)

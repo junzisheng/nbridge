@@ -1,4 +1,5 @@
-from typing import Callable, Coroutine, Optional
+from typing import Callable, Coroutine, Optional, Dict
+import datetime
 import os
 import signal
 import threading
@@ -8,7 +9,7 @@ from aexit_context import AexitContext
 
 import uvloop
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from constants import HANDLED_SIGNALS
 from utils import setup_logger
@@ -126,6 +127,7 @@ class Client(BaseModel):
     name: str
     token: str
     epoch: int = 0
+    add_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
 
     def increase_epoch(self) -> int:
         self.epoch += 1
@@ -133,11 +135,9 @@ class Client(BaseModel):
 
 
 class Public(BaseModel):
-    client: Client
     type: str
     name: str
-    local_host: str
-    local_port: int
+    mapping: Dict
     bind_port: int = 0
 
 

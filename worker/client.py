@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, Optional, List, Type, Union
+from typing import Dict, List, Type, Union
 from multiprocessing import Queue
 from multiprocessing.connection import Connection
 from functools import partial
@@ -7,7 +7,6 @@ from loguru import logger
 
 from protocols import Connector
 from worker.bases import ProcessWorker
-from aexit_context import AexitContext
 from utils import safe_remove
 from messager import Message, Event, MessageKeeper
 from proxy.client import ProxyClient
@@ -26,41 +25,49 @@ class ClientWorker(ProcessWorker):
     async def _handle_stop(self) -> None:
         pass
 
-    def on_message_proxy_create(self, epoch: int, port: int) -> None:
-        def on_session_made(proxy: ProxyClient) -> None:
-            self.proxy_list.append(proxy)
+    def make_receiver(self) -> Dict:
+        def proxy_create(epoch: int, port: int) -> None:
+            def on_session_made(proxy: ProxyClient) -> None:
+                self.proxy_list.append(proxy)
 
-        def on_lost(proxy: ProxyClient) -> None:
-            safe_remove(self.proxy_list, proxy)
-            self.message_keeper.send(Message(
-                Event.PROXY_LOST,
-                self.pid,
-                port
-            ))
+            def on_lost(proxy: ProxyClient) -> None:
+                safe_remove(self.proxy_list, proxy)
+                self.message_keeper.send(Message(
+                    Event.PROXY_LOST,
+                    self.pid,
+                    port
+                ))
 
-        connector = Connector(
-            partial(
-                ProxyClient,
-                self.client_settings,
-                on_session_made,
-                on_lost,
-                epoch
-            ),
-            host=self.client_settings.server_host,
-            port=port,
-        )
-        connector.connect()
+            connector = Connector(
+                partial(
+                    ProxyClient,
+                    self.client_settings,
+                    on_session_made,
+                    on_lost,
+                    epoch
+                ),
+                host=self.client_settings.server_host,
+                port=port,
+            )
+            connector.connect()
 
-        @self.aexit.add_callback_when_cancel_all
-        def _():
-            connector.abort()
-            for proxy in self.proxy_list:
-                proxy.transport.close()
-            self.proxy_list = []
+            @self.aexit.add_callback_when_cancel_all
+            def _():
+                connector.abort()
+                for proxy in self.proxy_list:
+                    proxy.transport.close()
+                self.proxy_list = []
 
-    def on_message_manager_session_made(self) -> None:
-        pass
+        def manager_session_made() -> None:
+            pass
 
-    def on_message_manager_session_lost(self) -> None:
-        self.aexit.cancel_all()
+        def manager_session_lost() -> None:
+            self.aexit.cancel_all()
+
+        return {
+            Event.MANAGER_SESSION_MADE: manager_session_made,
+            Event.MANAGER_SESSION_LOST: manager_session_lost,
+            Event.PROXY_CREATE: proxy_create
+        }
+
 

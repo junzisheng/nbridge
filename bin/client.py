@@ -80,7 +80,7 @@ class Client(Bin):
             parent_input_channel, parent_output_channel = Pipe()
             child_input_channel, child_output_channel = Pipe()
 
-            message_keeper = ProcessPipeMessageKeeper(self, parent_input_channel, child_output_channel)
+            message_keeper = ProcessPipeMessageKeeper(self.make_receiver(), parent_input_channel, child_output_channel)
             pro = Process(
                 target=run_worker,
                 args=(ClientWorker, client_settings, ProcessPipeMessageKeeper, child_input_channel, parent_output_channel)
@@ -128,6 +128,9 @@ class Client(Bin):
             elif reason == CloseReason.SERVER_CLOSE:
                 logger.info(f'【{client_settings.name} Server Close, Retry')
                 self.run_client()
+            else:
+                logger.info(f'【{client_settings.name} Server Close, {reason}')
+                self.closer.call_close()
 
         connector = ClientConnector(
             partial(
@@ -156,9 +159,14 @@ class Client(Bin):
             )
         )
 
-    def on_message_proxy_lost(self, pid: int, port: int) -> None:
-        if self.client:
-            self.workers[pid].proxy_state[port] -= 1
+    def make_receiver(self) -> Dict:
+        def proxy_lost(pid: int, port: int) -> None:
+            if self.client:
+                self.workers[pid].proxy_state[port] -= 1
+
+        return {
+            Event.PROXY_LOST: proxy_lost
+        }
 
     async def do_handle_stop(self) -> None:
         if self.client:
