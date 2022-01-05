@@ -22,7 +22,7 @@ jobs:
       ubuntu-latest
     steps:
     - uses: actions/checkout@v2
-      -
+
     - name: do tests
       run:
         pytest tests
