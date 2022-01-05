@@ -3,6 +3,8 @@ import pathlib
 from configparser import ConfigParser
 
 from pydantic import BaseSettings, BaseModel
+from tinydb import TinyDB
+from tinydb.storages import MemoryStorage
 
 from utils import wrapper_prefix_key, map_chain
 from common_bases import Public, Client
@@ -103,3 +105,9 @@ class ClientSettings(BaseModel):
 
 
 server_settings = ServerSettings()
+
+db = TinyDB(storage=MemoryStorage)
+# {"client_name": "", "token": "", "client": "", "state": "", epoch: 0}
+client_table = db.table('client')
+# {'port': 13, 'type': 'http', 'client_name': 'tt', 'custom_domain': 'xx', 'local_host': 12, 'local_port': 13}
+public_table = db.table('public')

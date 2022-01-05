@@ -124,10 +124,23 @@ class CommanderPublicTcp(Client):
         print(await waiter)
 
 
+class CommanderPublicHttp(Client):
+    async def add(self, client_name: str, local_addr: str, custom_domain: str, bind_port=0) -> None:
+        res = await self.client.command_call(
+            'add_http',
+            str(client_name),
+            local_addr.split(':'),
+            custom_domain,
+            bind_port
+        )
+        print(res)
+
+
 if __name__ == '__main__':
     Fire({
         'client': CommanderClient,
-        'tcp': CommanderPublicTcp
+        'tcp': CommanderPublicTcp,
+        'http': CommanderPublicHttp
     })
 
 

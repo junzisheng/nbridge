@@ -1,20 +1,21 @@
 import asyncio
-import copy
 import threading
 from typing import Dict, List, Optional, Union, Tuple
-from collections import defaultdict
 import uuid
 import os
 from asyncio import Future
+from asyncio.futures import _chain_future
 from asyncio.base_events import Server as Aserver
 from multiprocessing import Pipe, Process
 from functools import partial, cached_property
 
 import socket
 from loguru import logger
+from tinydb import Query, where
+from tinydb.operations import set
 
 from common_bases import Bin, Client
-from constants import CloseReason
+from constants import CloseReason, ManagerState
 from messager import Event
 from worker.bases import run_worker, ServerWorkerStruct
 from worker.server import ManagerWorker
@@ -23,7 +24,7 @@ from messager import ProcessPipeMessageKeeper, SocketChannel, Message, gather_me
 from commander import CommanderServer
 from utils import create_server_sock
 from manager.server import ManagerServer
-from config.settings import server_settings, BASE_DIR
+from config.settings import server_settings, BASE_DIR, client_table, public_table
 
 
 class ConfigError(Exception):
@@ -35,44 +36,25 @@ class Server(Bin):
         super(Server, self).__init__()
         self.workers: Dict[int, ServerWorkerStruct] = {}
         self.manager_server: Optional[Aserver] = None
-        self.manager_registry = Registry()
-        self.client_map = server_settings.client_map
-        self.public_map: Dict[int, Dict] = defaultdict(dict)
-        {
-            123: {
-                'type': 'tcp',
-                'client_name': ('127.0.0.1', 80)
-            },
-            222: {
-                'type': 'http',
-                'mapping': {
-                    'www.baidu.com': {
-                        'client_name': 'client_name',
-                        'local_addr': ('127.0.0.1', 80)
-                    }
-                }
-            }
-        }
 
     def start(self) -> None:
         self.run_manager()
         self.run_worker()
-        self.run_public_server()
+        # self.run_public_server()
         self.run_commander()
 
     def run_manager(self) -> None:
-        def on_manager_session_made(manager: ManagerServer) -> Future:
-            client_name = manager.client_name
-            self.manager_registry.register(client_name, manager)
-            return gather_message(
+        def on_manager_session_made(client_name: str, f: Future) -> None:
+            client = client_table.get(where('client_name') == client_name)
+            gather = gather_message(
                 self.message_keepers, Event.MANAGER_SESSION_MADE, client_name=client_name,
-                epoch=self.client_map[client_name].epoch
+                epoch=client['epoch']
             )
+            _chain_future(gather, f)
 
         def on_manager_session_lost(protocol: ManagerServer) -> None:
             client_name = protocol.client_name
             if protocol.close_reason != CloseReason.COMMANDER_REMOVE:
-                self.client_map[client_name].increase_epoch()
                 gather = gather_message(
                     self.message_keepers,
                     Event.MANAGER_SESSION_LOST,
@@ -82,15 +64,16 @@ class Server(Bin):
 
                 @gather.add_done_callback
                 def _(_):
-                    self.manager_registry.unregister(client_name)
+                    client_table.update(
+                        set('state', ManagerState.idle),
+                        where('client_name') == client_name,
+                    )
 
         self.manager_server = self._loop.run_until_complete(
             self._loop.create_server(
                 partial(
                     ManagerServer,
-                    self.client_map,
                     self.workers,
-                    manager_registry=self.manager_registry,
                     on_session_made=on_manager_session_made,
                     on_session_lost=on_manager_session_lost,
                 ),
@@ -103,10 +86,11 @@ class Server(Bin):
 
         @self.aexit.add_callback_when_cancel_all
         def _():
-            for manager in self.manager_registry.all_registry().values():  # type: ManagerServer
-                manager.close(CloseReason.SERVER_CLOSE)
-
-            logger.info(f'Manager Server Closed Done')
+            for client in client_table.all():
+                client_prt = client['client']
+                if client_prt:
+                    client_prt.close(CloseReason.SERVER_CLOSE)
+                    logger.info(f'{client["client_name"]} Disconnect Done')
             self.manager_server.close()
 
     def run_public_server(self) -> None:
@@ -177,15 +161,17 @@ class Server(Bin):
             logger.info(f'Proxy Server - 【{server_settings.manager_bind_host}:{proxy_port}】 - {pro.pid}: Started')
 
     def add_tcp(self, client_name: str, local_addr: Tuple[str, int], bind_port: int = 0) -> Tuple[Future, int]:
-        if bind_port != 0:
-            config = self.public_map[bind_port]
-            if config:
-                raise ConfigError(f'bind port: {bind_port} already in use: {config}')
-        if client_name not in self.client_map:
+        client = public_table.get(where('client_name') == client_name)
+        if client is None:
             raise ConfigError(f'client: {client_name} not add')
+        if bind_port != 0:
+            if public_table.search(where('port') == bind_port).count() > 0:
+                raise ConfigError(f'bind port: {bind_port} already in use')
         sock = create_server_sock((server_settings.manager_bind_host, bind_port))
-        bind_port = sock.getsockname()[1]
-        self.public_map[bind_port] = {client_name: local_addr, 'type': 'tcp'}
+        public_table.insert({
+            'port': sock.getsockname()[1], 'type': 'tcp', 'client_name': client_name,
+            'custom_domain': '', 'local_host': local_addr[0], 'local_port': local_addr[1]
+        })
         gather = gather_message(
             self.message_keepers,
             Event.TCP_ADD,
@@ -194,6 +180,42 @@ class Server(Bin):
         )
         broadcast_socket(self.socket_senders, sock.fileno())
         sock.close()
+        return gather, bind_port
+
+    def add_http(
+        self, client_name: str, local_addr: Tuple[str, int], custom_domain: str, bind_port: int = 0
+    ) -> Tuple[Future, int]:
+        sock = None
+        client = public_table.get(where('client_name') == client_name)
+        if client is None:
+            raise ConfigError(f'client: {client_name} not add')
+        if bind_port == 0:
+            sock = create_server_sock((server_settings.manager_bind_host, 0))
+            bind_port = sock.getsockname()[1]
+            config = self.public_map[bind_port]
+            config.update({'type': 'http', 'mapping': {custom_domain: (client_name, local_addr)}})
+        elif not self.public_map[bind_port]:
+            sock = create_server_sock((server_settings.manager_bind_host, bind_port))
+            config = self.public_map[bind_port]
+            config.update({'type': 'http', 'mapping': {custom_domain: (client_name, local_addr)}})
+        else:
+            config = self.public_map[bind_port]
+            if config['type'] != 'http':
+                raise ConfigError(f'bind port: {bind_port} already in use type: tcp')
+            if config['mapping'].get(custom_domain):
+                raise ConfigError(f'custom domain: {custom_domain} already set')
+            config['mapping'][custom_domain] = (client_name, local_addr)
+        gather = gather_message(
+            self.message_keepers,
+            Event.HTTP_ADD,
+            client_name,
+            local_addr,
+            custom_domain,
+            sock=True if sock else False
+        )
+        if sock:
+            broadcast_socket(self.socket_senders, sock.fileno())
+            sock.close()
         return gather, bind_port
 
     @cached_property
@@ -259,11 +281,15 @@ class ProxyExecutor(object):
     # ============ client  ============
     @_commander_lock_wrapper
     def add_client(self, client_name: str) -> Dict:
-        if client_name in self.executor.client_map:
+        client = client_table.get(where('client_name') == client_name)
+        if client:
             return {'code': -1, 'reason': f'{client_name} already added'}
         else:
             token = uuid.uuid4().hex
-            self.executor.client_map[client_name] = Client(name=client_name, token=token)
+            client = {
+                'client_name': client_name, "token": token, "state": ManagerState.idle, "epoch": 0, "client": None
+            }
+            client_table.insert(client)
             broadcast_message(
                 self.executor.message_keepers,
                 Event.CLIENT_ADD,
@@ -274,38 +300,34 @@ class ProxyExecutor(object):
 
     @_commander_lock_wrapper
     def rm_client(self, client_name: str):
-        if client_name in self.executor.client_map:
-            del self.executor.client_map[client_name]
-            public_map_items = list(self.executor.public_map.items())
-            for port, mapping in public_map_items:
-                if mapping['type'] == 'tcp':
-                    if client_name in mapping:
-                        del self.executor.public_map[port]
-
-            manager = self.executor.manager_registry.get(client_name)
-            if manager:
-                manager.close(CloseReason.COMMANDER_REMOVE)
-            gather = gather_message(
-                self.executor.message_keepers,
-                Event.CLIENT_REMOVE,
-                client_name=client_name
-            )
-            f = Future()
-
-            @gather.add_done_callback
-            def _(_):
-                self.executor.manager_registry.unregister(client_name)
-                f.set_result(
-                    {'code': 1, 'reason': f'{client_name} remove done'}
-                )
-            return f
-        else:
+        client = client_table.get(where('client_name') == client_name)
+        if not client:
             return {'code': -1, 'reason': f'{client_name} does not exist'}
+        client_table.remove(where('client_name') == client_name)
+        # 关闭public
+        public_table.remove(where('client_name') == client_name)
+        manager = client['client']
+        if manager:
+            manager.close(CloseReason.COMMANDER_REMOVE)
+        gather = gather_message(
+            self.executor.message_keepers,
+            Event.CLIENT_REMOVE,
+            client_name=client_name
+        )
+        f = Future()
 
-    def ls_client(self) -> List[Client]:
-        client_list = list(self.executor.client_map.values())
-        client_list.sort(key=lambda c: c.add_at)
-        return client_list
+        @gather.add_done_callback
+        def _(_):
+            f.set_result({'code': 1, 'reason': f'{client_name} remove done'})
+        return f
+
+    @staticmethod
+    def ls_client() -> List[Dict]:
+        all_clients = client_table.all()
+        for c in all_clients:
+            del c['client']
+        return all_clients
+        # return [x for x in client_table.all()]
 
     # ============ public ============
     def ls_public(self, client_name: Union[str, bytes]) -> None:
@@ -313,7 +335,7 @@ class ProxyExecutor(object):
 
     # ============ public.tcp ============
     @_commander_lock_wrapper
-    def add_tcp(self, client_name: str, local_addr: Tuple[str, int], bind_port=0) -> Future:
+    def add_tcp(self, client_name: str, local_addr: Tuple[str, int], bind_port=0) -> Union[str, Future]:
         try:
             gather, port = self.executor.add_tcp(client_name, local_addr, bind_port)
         except ConfigError as e:
@@ -325,17 +347,13 @@ class ProxyExecutor(object):
             f.set_result(port)
         return f
 
-    def ls_tcp(self) -> List:
-        tcp_list = []
-        for port, public in self.executor.public_map.items():
-            if public['type'] == 'tcp':
-                public['port'] = port
-                tcp_list.append(public)
-        return tcp_list
+    @staticmethod
+    def ls_tcp() -> List[Dict]:
+        return public_table.search(where('type') == 'tcp')
 
     def rm_tcp(self, bind_port: int) -> Union[Future, Dict]:
-        if bind_port in self.executor.public_map and self.executor.public_map[bind_port].get('type') == 'tcp':
-            del self.executor.public_map[bind_port]
+        doc_ids = public_table.remove((where('port') == bind_port) & (where('type') == 'tcp'))
+        if doc_ids:
             gather = gather_message(
                 self.executor.message_keepers,
                 Event.TCP_REMOVE,
@@ -352,8 +370,19 @@ class ProxyExecutor(object):
 
     # ============ public.http ============
     @_commander_lock_wrapper
-    def add_http(self) -> bool:
-        pass
+    def add_http(
+        self, client_name: str, local_addr: Tuple[str, int], custom_domain: str, bind_port: int = 0
+    ) -> Union[str, Future]:
+        try:
+            gather, port = self.executor.add_http(client_name, local_addr, custom_domain, bind_port)
+        except ConfigError as e:
+            return str(e)
+        f = Future()
+
+        @gather.add_done_callback
+        def _(_):
+            f.set_result(port)
+        return f
 
     @_commander_lock_wrapper
     def rm_http(self) -> bool:

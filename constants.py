@@ -25,3 +25,9 @@ class CloseReason(object):
     COMMANDER_REMOVE = 9
     TCP_CLOSE = 10
 
+
+class ManagerState(object):
+    session = 1
+    closing = -1
+    idle = 0
+

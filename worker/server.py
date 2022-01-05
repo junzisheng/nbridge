@@ -1,7 +1,8 @@
-import asyncio
-from collections import defaultdict
+from typing import Tuple, Dict, Optional, List, Type, Union, Mapping
 import os
-from typing import Tuple, Dict, Optional, List, Type
+import asyncio
+import socket
+from collections import defaultdict
 from multiprocessing.connection import Connection
 from functools import partial
 from asyncio.base_events import Server
@@ -9,21 +10,33 @@ from asyncio import Task, CancelledError, TimeoutError, Future
 from async_timeout import timeout
 
 from loguru import logger
+from tinydb import TinyDB, where
+from tinydb.operations import set
 
-from constants import CloseReason
+from constants import CloseReason, ManagerState
 from worker.bases import ProcessWorker, ProxyStateWrapper, ClientStruct, ProxyPool
 from aexit_context import AexitContext
 from messager import Message, Event, ProcessPipeMessageKeeper, SocketChannel
-from public.protocol import PublicProtocol
-from utils import safe_remove, catch_cor_exception, socket_fromfd, protocol_sockname
+from public.protocol import PublicProtocol, HttpPublicProtocol
+from utils import safe_remove, catch_cor_exception, socket_fromfd, protocol_sockname, pop_table_row
 from config.settings import server_settings
+
+PubProType = Union[PublicProtocol, HttpPublicProtocol]
+
+
+db = TinyDB()
+client_table = db.table('client_table')
+public_table = db.table('public_table')
+sock_table = db.table('sock_table')
 
 
 @catch_cor_exception
-async def _proxy_public_pair(client: ClientStruct, public: PublicProtocol, local_addr: Tuple[str, int], delay: int) -> None:
+async def _proxy_public_pair(
+    proxy_pool: ProxyPool, public: PubProType, local_addr: Tuple[str, int], delay: int
+) -> None:
     try:
         async with timeout(delay):
-            proxy = await client.proxy_pool.get()  # type: ProxyStateWrapper
+            proxy = await proxy_pool.get()  # type: ProxyStateWrapper
     except CancelledError:
         public.transport.close()
     except TimeoutError:
@@ -71,21 +84,23 @@ class ManagerWorker(ProcessWorker):
 
     def run_proxy_server(self) -> None:
         def on_proxy_session_made(proxy: ProxyStateWrapper) -> None:
-            client = self.client_info.get(proxy.client_name)
-            if not client or not client.session:
+            client_name = proxy.client_name
+            client = client_table.get(where('client_name') == client_name)
+            if not client or client['state'] != ManagerState.session:
                 proxy.close(CloseReason.MANAGE_CLIENT_LOST)
             else:
-                client.proxy_pool.put_nowait(proxy)
+                client['proxy_pool'].put_nowait(proxy)
 
         def on_proxy_session_lost(proxy: ProxyStateWrapper) -> None:
-            # if proxy.close_reason not in [CloseReason.PROXY_RECYCLE, CloseReason.MANAGE_CLIENT_LOST]:
-            client = self.client_info[proxy.client_name]
-            client.proxy_pool.remove(proxy)
+            client_name = proxy.client_name
+            client = client_table.get(where('client_name') == client_name)
+            if client:
+                client['proxy_pool'].remove(proxy)
 
         def on_task_done(proxy: ProxyStateWrapper):
-            client = self.client_info.get(proxy.client_name)
-            if client and client.session:
-                client.proxy_pool.put_nowait(proxy)
+            client = client_table.get(where('client_name') == proxy.client_name)
+            if client and client['state'] == ManagerState.session:
+                client['proxy_pool'].put_nowait(proxy)
 
         proxy_server: Server = self._loop.run_until_complete(
             self._loop.create_server(
@@ -103,26 +118,40 @@ class ManagerWorker(ProcessWorker):
     def make_receiver(self) -> Dict:
         client_aexit_map: Dict[str, AexitContext] = defaultdict(AexitContext)
         tcp_aexit_map: Dict[int, AexitContext] = defaultdict(AexitContext)
+        http_aexit_map: Dict[Union[str, int], AexitContext] = defaultdict(AexitContext)
+        port_map: Dict[int, Server] = {}
 
         @self.aexit.add_callback_when_cancel_all
         def _():
-            for aexit in list(client_aexit_map.values()) + list(tcp_aexit_map.values()):
-                aexit.cancel_all()
-            for prt in public_protocol_list:
-                prt.transport.close()
-            for ps, _, _ in public_server:
-                ps.close()
+            for s in port_map.values():
+                s.close()
 
         def manager_session_made(client_name: str, epoch) -> None:
-            client = self.client_info[client_name]
-            client.open_session(epoch)
+
+            def perform_update(doc: Dict) -> None:
+                doc['state'] = ManagerState.session
+                doc['epoch'] = epoch
+            client_table.update(
+                perform_update,
+                where('client_name') == client_name
+            )
 
         def manager_session_lost(client_name: str) -> Future:
-            client = self.client_info[client_name]
-            client_aexit_map[client_name].cancel_all()
-            # _close_public_server(client_name=client_name)
-            # wait all protocol closed callback
-            return client.close_session()
+
+            def perform_update(doc: Dict) -> None:
+                doc['state'] = ManagerState.idle
+                doc['epoch'] = -1
+            client_table.update(
+                perform_update,
+                where('client_name') == client_name
+            )
+            # close public protocol; close proxy protocol; public pair;
+            client = client_table.get(where('client_name') == client_name)
+            aexit: AexitContext = client['aexit']
+            aexit.cancel_all()
+            proxy_pool: ProxyPool = client['proxy_pool']
+            # proxy_pool close will close all public protocol or cancel pair task
+            return proxy_pool.close_all(CloseReason.MANAGE_CLIENT_LOST)
 
         # =============== commander ===============
         def client_add(client_name: str, token: str) -> None:
@@ -131,30 +160,34 @@ class ManagerWorker(ProcessWorker):
                 partial(self.async_create_proxy, client_name),
                 min_size=server_settings.proxy_pool_size
             )
-            client = ClientStruct(
-                name=client_name, token=token,
-                proxy_pool=proxy_pool
-            )
-            self.client_info[client_name] = client
             proxy_pool.start_recycle_task()
-            client_aexit_map[client_name].add_callback_when_cancel_all(proxy_pool.recycle_task.cancel)
+            aexit = AexitContext()
+            client = {
+                'client_name': client_name, 'token': token, 'proxy_pool': proxy_pool,
+                'aexit': aexit, 'epoch': -1
+            }
+            client_table.insert(client)
 
         def client_remove(client_name: str) -> Future:
-            client = self.client_info[client_name]
-            f = client.close_session()
+            client = pop_table_row(client_table, where('client_name') == client_name)
+            aexit: AexitContext = client['aexit']
+            proxy_pool: ProxyPool = client['proxy_pool']
+            proxy_pool.recycle_task.cancel()
+            aexit.cancel_all()
+            f = proxy_pool.close_all(CloseReason.MANAGE_CLIENT_LOST)
 
-            @f.add_done_callback
-            def _(_):
-                del self.client_info[client_name]
-                del client_aexit_map[client_name]
-            client_aexit_map[client_name].cancel_all()
-            _close_public_server(client_name=client_name)
+            # @f.add_done_callback
+            # def _(_):
+            #     del self.client_info[client_name]
+            #     del client_aexit_map[client_name]
+            # client_aexit_map[client_name].cancel_all()
+            # _close_public_server(client_name=client_name)
             return f
 
         # public proxy pair
-        pair_tasks: Dict[PublicProtocol, Task] = {}
+        pair_tasks: Dict[PubProType, Task] = {}
         public_server: List[Tuple[Server, str, int]] = []
-        public_protocol_list: List[PublicProtocol] = []
+        public_protocol_list: List[PubProType] = []
 
         # close public server by port or client_name
         def _close_public_server(client_name: Optional[str] = None, port: Optional[int] = None) -> None:
@@ -166,48 +199,105 @@ class ManagerWorker(ProcessWorker):
                 public_server.remove(ps)
                 ps[0].close()
 
+        def _on_public_connection_lost(public: PublicProtocol) -> None:
+            safe_remove(public_protocol_list, public)
+            task = pair_tasks.get(public)
+            if task:  # cancel pair task
+                task.cancel()
+
         def tcp_add(client_name: str, local_addr: Tuple[str, int]) -> None:
-            fileno = self.socket_receiver.receive()
-            sock = socket_fromfd(fileno)
-            os.close(fileno)  # close duplicate fd
-            port = sock.getsockname()[1]
+            sock, port = receive_sock(self.socket_receiver)
 
             def on_connection_made(public: PublicProtocol) -> None:
-                _client = self.client_info.get(client_name)
-                if not _client or not _client.session:  # may be client lost or removed
+                client = client_table.get(where('client_name') == client_name)
+                if not client:  # client maybe lost or removed
                     public.transport.close()
                 else:
+                    # client aexit
+                    aexit: AexitContext = client['aexit']
+                    proxy_pool: ProxyPool = client['proxy_pool']
                     public_protocol_list.append(public)
-                    task = client_aexit_map[client_name].create_task(
-                        _proxy_public_pair(_client, public, local_addr, server_settings.proxy_wait_timeout)
+                    _task = aexit.create_task(
+                        _proxy_public_pair(proxy_pool, public, local_addr, server_settings.proxy_wait_timeout)
                     )
-                    pair_tasks[public] = task
+                    pair_tasks[public] = _task
                     task.add_done_callback(lambda _x: safe_remove(pair_tasks,  public))
-                    tcp_aexit_map[port].monitor_future(task)
-
-            def on_connection_lost(public: PublicProtocol) -> None:
-                safe_remove(public_protocol_list, public)
-                task = pair_tasks.get(public)
-                if task:  # cancel pair task
-                    task.cancel()
+                    # port sock aexit
+                    sock_row = sock_table.get((where('port') == port) & (where('type') == 'tcp'))
+                    _sock_aexit: AexitContext = sock_row['aexit']
+                    _sock_aexit.monitor_future(_task)
 
             async def create_tcp_server():
                 server: Server = await self._loop.create_server(
-                    partial(PublicProtocol, on_connection_made, on_connection_lost),
+                    partial(PublicProtocol, on_connection_made, _on_public_connection_lost),
                     sock=sock
                 )
-                public_server.append((server, client_name, sock.getsockname()[1]))
+                sock_table.update(
+                    set('server', server),
+                    where('port') == port
+                )
 
-            t = tcp_aexit_map[port].create_task(create_tcp_server())
-            client_aexit_map[client_name].monitor_future(t)
+            _client = client_table.get(where('client_name') == client_name)
+            client_aexit: AexitContext = _client['aexit']
+            sock_aexit: AexitContext = AexitContext()
+            sock_table.insert(
+                {'port': port, 'server': None, 'aexit': sock_aexit}
+            )
+            public_table.insert(
+                {'client_name': client_name, 'type': 'tcp',
+                 'local_host': local_addr[0], 'local_port': local_addr[1],
+                 'custom_domain': '', 'port': port
+                 }
+            )
+            task = client_aexit.create_task(create_tcp_server())
+            sock_aexit.monitor_future(task)
 
         def tcp_remove(port: int) -> None:
+            sock_row = pop_table_row(sock_table, (where('port') == port) & (where('type') == 'tcp'))
+            aexit: AexitContext = sock_row['aexit']
+            server: Optional[Server] = sock_row['server']
+            if server:
+                server.close()
+            aexit.cancel_all()
             for public in public_protocol_list:
                 if protocol_sockname(public.transport)[1] == port:
                     public.transport.close()
-            _close_public_server(port=port)
-            tcp_aexit_map[port].cancel_all()
-            del tcp_aexit_map[port]
+
+        http_map: Dict[str, Tuple[str, Tuple[str, int]]] = {}
+
+        def http_add(
+            _client_name: str, _local_addr: Tuple[str, int], _custom_domain: str, sock: bool
+        ) -> None:
+            http_map[_custom_domain] = (_client_name, _local_addr)
+            if sock:
+                sock, port = receive_sock(self.socket_receiver)
+
+                def on_request_event_received(public: HttpPublicProtocol) -> None:
+                    custom_domain = public.domain
+                    client_name, local_addr = http_map.get(custom_domain, (None, [None, None]))
+                    if client_name is None:
+                        public.transport.close()
+                        return
+                    client = self.client_info.get(client_name)
+                    if not client or not client.session:
+                        public.transport.close()
+                        return
+                    public_protocol_list.append(public)
+                    task = client_aexit_map[client_name].create_task(
+                        _proxy_public_pair(client, public, local_addr, server_settings.proxy_wait_timeout)
+                    )
+                    pair_tasks[public] = task
+                    task.add_done_callback(lambda _x: safe_remove(pair_tasks, public))
+                    http_aexit_map[port].monitor_future(task)
+                    http_aexit_map[custom_domain].monitor_future(task)
+
+                async def create_http_server():
+                    server: Server = await self._loop.create_server(
+                        partial(HttpPublicProtocol, on_request_event_received, _on_public_connection_lost),
+                        sock=sock
+                    )
+                    public_server.append((server, _client_name, sock.getsockname()[1]))
+                http_aexit_map[port].create_task(create_http_server())
 
         return {
             Event.MANAGER_SESSION_MADE: manager_session_made,
@@ -216,7 +306,17 @@ class ManagerWorker(ProcessWorker):
             Event.CLIENT_REMOVE: client_remove,
             Event.TCP_ADD: tcp_add,
             Event.TCP_REMOVE: tcp_remove,
+            Event.HTTP_ADD: http_add
         }
+
+
+def receive_sock(sock_receiver: SocketChannel) -> Tuple[socket.socket, int]:
+    fileno = sock_receiver.receive()
+    sock = socket_fromfd(fileno)
+    os.close(fileno)  # close duplicate fd
+    port = sock.getsockname()[1]
+    return sock, port
+
 
 
 

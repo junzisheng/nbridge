@@ -23,6 +23,8 @@ class Event(object):
     CLIENT_REMOVE = "CLIENT_REMOVE"
     TCP_ADD = "TCP_ADD"
     TCP_REMOVE = "TCP_REMOVE"
+    HTTP_ADD = "HTTP_ADD"
+    HTTP_REMOVE = "HTTP_REMOVE"
 
 
 class MessageType:

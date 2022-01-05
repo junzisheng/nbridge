@@ -1,4 +1,4 @@
-from typing import Iterator, Any, Union, Tuple, Callable, Awaitable
+from typing import Iterator, Any, Union, Tuple, Callable, Awaitable, Dict
 import os
 import logging
 import sys
@@ -8,6 +8,8 @@ import socket
 import errno
 
 from loguru import logger
+from tinydb.table import Table
+from tinydb.queries import Query
 
 
 def ignore(*args, **kwargs): pass
@@ -105,6 +107,12 @@ def catch_cor_exception(cor: Callable[..., Awaitable[Any]]):
 def protocol_sockname(transport: transports.Transport) -> Tuple[str, int]:
     sock: socket.socket = transport.get_extra_info('socket')
     return sock.getsockname()
+
+
+def pop_table_row(table: Table, query: Query) -> Dict:
+    row = table.get(query)
+    table.remove(query)
+    return row
 
 
 def setup_logger(log_file_dir, log_file_name: str):

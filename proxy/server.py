@@ -81,8 +81,6 @@ class ProxyServer(BaseProtocol, PingPong, Forwarder):
     def set_forwarder(self, forwarder: 'PublicProtocol', local_host: str, local_port: int) -> None:
         super(ProxyServer, self).set_forwarder(forwarder)
         from proxy.client import ProxyClient
-        sock: socket = forwarder.transport.get_extra_info('socket')
-        _, port = sock.getsockname()
         self.remote_call(
             ProxyClient.rpc_local_pair,
             local_host,
