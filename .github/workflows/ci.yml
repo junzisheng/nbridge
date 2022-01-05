@@ -22,7 +22,33 @@ jobs:
     - name: do tests
       working-directory: .
       run: |
+        echo '-------'
+        hostname
+        echo '-------'
         pytest tests
+
+  t1:
+    runs-on:
+      ubuntu-latest
+    steps:
+      - name: t1
+      run: |
+        echo '-------'
+        hostname
+        echo '-------'
+
+  t2:
+    runs-on:
+      ubuntu-latest
+    steps:
+      - name: t1
+      run: |
+        echo '-------'
+        hostname
+        echo '-------'
+
+
+
 
 
 
