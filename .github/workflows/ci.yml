@@ -27,6 +27,8 @@ jobs:
     - name: do tests
       run: |
         pip install pytest
+        echo 'pip done'
+        pwd
         pytest tests
 
 
