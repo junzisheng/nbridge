@@ -29,7 +29,6 @@ jobs:
         pip install pytest
         echo 'pip done'
         pwd
-        pytest tests
 
 
 
