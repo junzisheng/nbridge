@@ -24,6 +24,7 @@ jobs:
       ubuntu-latest
     needs: build
     steps:
+    - uses: actions/checkout@v2
     - name: do tests
       run: |
         pip install pytest
