@@ -2,3 +2,4 @@ uvloop==0.16.0
 loguru==0.5.3
 pydantic==1.8.2
 async-timeout==4.0.1
+tinydb

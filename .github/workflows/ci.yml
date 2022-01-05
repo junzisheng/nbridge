@@ -1,0 +1,30 @@
+name:
+  nbridge actions
+on:
+  push
+
+jobs:
+  build:
+    runs-on:
+      ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    - uses: actions/setup-python@v2
+      with:
+        python-version: 3.8
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: get ip
+      run: |
+        echo '-------'
+        curl http://pv.sohu.com/cityjson?ie=utf-8
+        echo '-------'
+    - name: run proxier
+      working-directory: .
+      run: |
+        python bin/client -s 1.117.201.217 -n nn -t c8d610ad9caa4eb2b99cc7c2f622ba5f
