@@ -27,8 +27,7 @@ jobs:
     - name: do tests
       run: |
         pip install pytest
-        ls -la /home/runner/work/nbridge/nbridge
-        pytest tests
+        python bin/server.py
 
 
 
