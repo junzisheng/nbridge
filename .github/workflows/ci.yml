@@ -27,6 +27,7 @@ jobs:
     - name: do tests
       run: |
         pip install pytest
+        ls -la $GITHUB_WORKSPACE
         pytest tests
 
 
