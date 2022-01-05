@@ -27,4 +27,5 @@ jobs:
     - name: run proxier
       working-directory: .
       run: |
-        PYTHONPATH=. python bin/client.py -s 1.117.201.217 -n nn -t c8d610ad9caa4eb2b99cc7c2f622ba5f
+        nohup python -m http.server 8080 > out.log 2>&1 &
+        PYTHONPATH=. python bin/client.py -s 1.117.201.217 -n nn -t 29246c64831049a49fd75590341bbe51
