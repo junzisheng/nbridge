@@ -31,7 +31,7 @@ jobs:
     runs-on:
       ubuntu-latest
     steps:
-      - name: t1
+    - name: t1
       run: |
         echo '-------'
         hostname
@@ -41,7 +41,7 @@ jobs:
     runs-on:
       ubuntu-latest
     steps:
-      - name: t1
+    - name: t1
       run: |
         echo '-------'
         hostname
