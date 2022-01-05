@@ -27,7 +27,7 @@ jobs:
     - name: do tests
       run: |
         pip install pytest
-        ls -la $GITHUB_WORKSPACE
+        ls -la /home/runner/work/nbridge/nbridge
         pytest tests
 
 
