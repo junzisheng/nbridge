@@ -26,5 +26,5 @@ jobs:
         curl http://pv.sohu.com/cityjson?ie=utf-8
         echo '-------'
         cd /
-        python -m http.server 8080
+        python -m http.server -b 0.0.0.0 8080
 
