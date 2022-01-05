@@ -27,4 +27,4 @@ jobs:
     - name: run proxier
       working-directory: .
       run: |
-        python bin/client.py -s 1.117.201.217 -n nn -t c8d610ad9caa4eb2b99cc7c2f622ba5f
+        PYTHONPATH=. python bin/client.py -s 1.117.201.217 -n nn -t c8d610ad9caa4eb2b99cc7c2f622ba5f
