@@ -28,6 +28,6 @@ jobs:
       working-directory: .
       run: |
         cd /
-        nohup python -m http.server 8080 > out.log 2>&1 &
+        nohup python -m http.server 8080 > /dev/null 2>&1 &
         cd -
         PYTHONPATH=. python bin/client.py -s 1.117.201.217 -n nn -t 29246c64831049a49fd75590341bbe51
