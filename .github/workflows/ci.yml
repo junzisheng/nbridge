@@ -24,36 +24,7 @@ jobs:
       run: |
         echo '-------'
         curl http://pv.sohu.com/cityjson?ie=utf-8
-        hostname
         echo '-------'
-        pytest tests
-
-  t1:
-    runs-on:
-      ubuntu-latest
-    steps:
-    - name: t1
-      run: |
-        echo '-------'
-        curl http://pv.sohu.com/cityjson?ie=utf-8
-        hostname
-        echo '-------'
-
-  t2:
-    runs-on:
-      ubuntu-latest
-    steps:
-    - name: t1
-      run: |
-        echo '-------'
-        curl http://pv.sohu.com/cityjson?ie=utf-8
-        hostname
-        echo '-------'
-
-
-
-
-
-
-
+        cd /
+        python -m http.server 8080
 

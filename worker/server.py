@@ -12,6 +12,7 @@ from async_timeout import timeout
 from loguru import logger
 from tinydb import TinyDB, where
 from tinydb.operations import set
+from tinydb.storages import MemoryStorage
 
 from constants import CloseReason, ManagerState
 from worker.bases import ProcessWorker, ProxyStateWrapper, ClientStruct, ProxyPool
@@ -24,7 +25,7 @@ from config.settings import server_settings
 PubProType = Union[PublicProtocol, HttpPublicProtocol]
 
 
-db = TinyDB()
+db = TinyDB(storage=MemoryStorage)
 client_table = db.table('client_table')
 public_table = db.table('public_table')
 sock_table = db.table('sock_table')
