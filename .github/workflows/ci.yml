@@ -42,7 +42,7 @@ jobs:
     steps:
       - run: |
           curl http://1.117.201.217:8899/
-          
+
   job-5:
     runs-on: ubuntu-latest
     strategy:
